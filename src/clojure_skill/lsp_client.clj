@@ -25,11 +25,11 @@
 (defn detect-project-root
   "Walk up from file-path to find the nearest project root.
   Looks for deps.edn, project.clj, bb.edn, or shadow-cljs.edn.
-  Returns absolute path string or nil if not found."
+  Resolves symlinks to canonical path to avoid duplicate bridges."
   [file-path]
   (when file-path
-    (let [abs (fs/absolutize file-path)
-          start-dir (if (fs/directory? abs) abs (fs/parent abs))]
+    (let [real (fs/real-path file-path)
+          start-dir (if (fs/directory? real) real (fs/parent real))]
       (loop [dir start-dir]
         (when (and dir (not= (str dir) "/"))
           (if (some #(fs/exists? (fs/path dir %)) project-markers)
@@ -82,7 +82,8 @@
 ;; ============================================================================
 
 (defn start-bridge!
-  "Start bridge in background. Waits up to 60s for port file to appear."
+  "Start bridge in background. Waits up to 180s for port file to appear.
+  Large projects (shadow-cljs, monorepos) can take over 60s to initialize."
   [root]
   (println (str "Starting clj-lsp-bridge for " root "..."))
   (let [script-name "clj-lsp-bridge"]
@@ -90,12 +91,12 @@
                      {:dir root
                       :out :inherit
                       :err :inherit})
-    ;; Wait for port file
+    ;; Wait for port file (360 attempts * 500ms = 180s)
     (loop [attempts 0]
       (cond
-        (>= attempts 120)
+        (>= attempts 360)
         (do
-          (println "Error: Bridge did not start within 60 seconds")
+          (println "Error: Bridge did not start within 180 seconds")
           (System/exit 1))
 
         (and (fs/exists? (port-file root))
