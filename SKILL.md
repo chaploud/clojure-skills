@@ -36,17 +36,17 @@ hooks:
 
 ## Dependency Check
 
-!`which bb 2>/dev/null && echo "✓ bb" || echo "✗ bb MISSING"`
-!`which bbin 2>/dev/null && echo "✓ bbin" || echo "✗ bbin MISSING"`
-!`which clj-paren-repair-claude-hook 2>/dev/null && echo "✓ clj-tools" || echo "✗ clj-tools MISSING"`
-!`which clojure-lsp 2>/dev/null && echo "✓ clojure-lsp" || echo "✗ clojure-lsp MISSING (optional: needed for diagnostics/references/definition)"`
+!`which bb 2>/dev/null && echo "✓ bb" || echo "✗ bb MISSING — install: brew install borkdude/brew/babashka (https://github.com/babashka/babashka#installation)"`
+!`which bbin 2>/dev/null && echo "✓ bbin" || echo "✗ bbin MISSING — install: bb install io.github.babashka/bbin (https://github.com/babashka/bbin)"`
+!`which clj-paren-repair-claude-hook 2>/dev/null && echo "✓ clj-tools" || echo "✗ clj-tools MISSING — install: cd ~/.claude/skills/clojure && bb install"`
+!`which clojure-lsp 2>/dev/null && echo "✓ clojure-lsp" || echo "✗ clojure-lsp MISSING (optional) — install: brew install clojure-lsp/brew/clojure-lsp-native (https://clojure-lsp.io/installation/)"`
 
-If any required dependency shows ✗ MISSING, **STOP** and show the user how to install:
+If any **required** dependency (bb, bbin, clj-tools) shows ✗ MISSING:
+1. **STOP** immediately — do not attempt Clojure file edits without the hooks working
+2. Show the user the exact install command from the line above
+3. After install, the hooks will activate automatically on next Write/Edit
 
-- **bb** (Babashka): https://github.com/babashka/babashka#installation
-- **bbin**: `bb install io.github.babashka/bbin` or https://github.com/babashka/bbin
-- **clj-tools**: `cd <clojure-claude-skill-dir> && bbin install .`
-- **clojure-lsp** (optional): https://clojure-lsp.io/installation/
+clojure-lsp is optional — without it, diagnostics/references/definition are unavailable but paren repair and REPL evaluation still work.
 
 ## Parenthesis Repair
 
@@ -78,17 +78,24 @@ This scans `.nrepl-port` file and running JVM/Babashka processes to find nREPL s
 
 ### Evaluate code
 
+**IMPORTANT: ALWAYS use heredoc syntax** to avoid zsh `!` escaping issues.
+Do NOT use `clj-nrepl-eval -p PORT "code"` style — it will break on strings containing `!`.
+
 ```bash
-clj-nrepl-eval -p <port> "<clojure-code>"
+clj-nrepl-eval -p <port> <<'EOF'
+(+ 1 2 3)
+EOF
 ```
 
 With timeout (milliseconds):
 
 ```bash
-clj-nrepl-eval -p <port> --timeout 5000 "<clojure-code>"
+clj-nrepl-eval -p <port> --timeout 5000 <<'EOF'
+(Thread/sleep 10000)
+EOF
 ```
 
-With heredoc for multi-line code:
+Multi-line code:
 
 ```bash
 clj-nrepl-eval -p <port> <<'EOF'
@@ -116,13 +123,17 @@ clj-nrepl-eval -p PORT --reset-session  # Reset persistent session
 ## Code Navigation (clojure-lsp)
 
 If `clojure-lsp` is installed, use `clj-lsp-client` for code intelligence.
-The bridge auto-starts when you first query.
+The bridge auto-starts per project when you first query with `--file`.
+
+Project root is **auto-detected** from the `--file` path by walking up to find
+`deps.edn`, `project.clj`, `bb.edn`, or `shadow-cljs.edn`. This works across
+multiple projects added via `/add-dir`.
 
 ### Diagnostics
 
 ```bash
-clj-lsp-client diagnostics                        # All files
-clj-lsp-client diagnostics --file src/my/ns.clj   # Single file
+clj-lsp-client diagnostics                        # All files (current project)
+clj-lsp-client diagnostics --file src/my/ns.clj   # Single file (auto-detects project)
 ```
 
 ### Find references
@@ -146,9 +157,10 @@ clj-lsp-client hover --file src/my/ns.clj --line 10 --col 5
 ### Bridge management
 
 ```bash
-clj-lsp-client start    # Start bridge (idempotent)
-clj-lsp-client stop     # Stop bridge
-clj-lsp-client status   # Check bridge status
+clj-lsp-client start                             # Start bridge for CWD project
+clj-lsp-client start --project-root /path/to/project  # Start for specific project
+clj-lsp-client stop                              # Stop bridge
+clj-lsp-client status                            # Check bridge status
 ```
 
 The bridge is automatically stopped on SessionEnd via hooks.
@@ -159,5 +171,6 @@ The bridge is automatically stopped on SessionEnd via hooks.
 - **ClojureDart (.cljd)**: Reader conditionals with `:cljd` feature are fully supported
 - **Parenthesis repair is automatic**: Hooks fire on every Write/Edit — you don't need to run it manually unless troubleshooting
 - **REPL state persists**: Each host:port has its own persistent session. Use `--reset-session` to start fresh
-- **LSP bridge auto-starts**: First `clj-lsp-client` query starts the bridge automatically; it stops on session end
+- **LSP bridge is per-project**: Each project gets its own bridge instance, auto-detected from file paths
 - **Line numbers**: `clj-lsp-client` uses 1-based line numbers and 0-based column numbers (matching Emacs conventions)
+- **Always use heredoc** for `clj-nrepl-eval`: `<<'EOF' ... EOF` — never use quoted argument style

@@ -2,7 +2,11 @@
   "Query client for clj-lsp-bridge.
 
   Connects to the bridge's TCP port and sends JSON commands.
-  Auto-starts bridge if not running."
+  Auto-starts bridge if not running.
+
+  Project root is detected from --file path (walks up to find
+  deps.edn/project.clj/bb.edn/shadow-cljs.edn), falling back to CWD.
+  This enables multi-project support with /add-dir."
   (:require [babashka.fs :as fs]
             [babashka.process :as process]
             [cheshire.core :as json]
@@ -11,11 +15,36 @@
   (:import [java.net Socket]))
 
 ;; ============================================================================
-;; Bridge Discovery
+;; Project Root Detection
 ;; ============================================================================
 
-(defn project-root []
-  (System/getProperty "user.dir"))
+(def project-markers
+  "Files that indicate a Clojure project root, in priority order."
+  ["deps.edn" "project.clj" "bb.edn" "shadow-cljs.edn"])
+
+(defn detect-project-root
+  "Walk up from file-path to find the nearest project root.
+  Looks for deps.edn, project.clj, bb.edn, or shadow-cljs.edn.
+  Returns absolute path string or nil if not found."
+  [file-path]
+  (when file-path
+    (let [abs (fs/absolutize file-path)
+          start-dir (if (fs/directory? abs) abs (fs/parent abs))]
+      (loop [dir start-dir]
+        (when (and dir (not= (str dir) "/"))
+          (if (some #(fs/exists? (fs/path dir %)) project-markers)
+            (str dir)
+            (recur (fs/parent dir))))))))
+
+(defn resolve-root
+  "Resolve project root: detect from file path, or fall back to CWD."
+  [{:keys [file]}]
+  (or (when file (detect-project-root file))
+      (System/getProperty "user.dir")))
+
+;; ============================================================================
+;; Bridge Discovery
+;; ============================================================================
 
 (defn lsp-dir [root]
   (str (fs/path root ".lsp")))
@@ -55,7 +84,7 @@
 (defn start-bridge!
   "Start bridge in background. Waits up to 60s for port file to appear."
   [root]
-  (println "Starting clj-lsp-bridge...")
+  (println (str "Starting clj-lsp-bridge for " root "..."))
   (let [script-name "clj-lsp-bridge"]
     (process/process [script-name "start" root]
                      {:dir root
@@ -121,7 +150,7 @@
 
 (defn cmd-start [root]
   (if (bridge-running? root)
-    (println (str "Bridge already running (PID " (read-pid root) ", port " (read-port root) ")"))
+    (println (str "Bridge already running for " root " (PID " (read-pid root) ", port " (read-port root) ")"))
     (start-bridge! root)))
 
 (defn cmd-stop [root]
@@ -139,16 +168,16 @@
           (catch Exception _ nil)))
       (fs/delete-if-exists (pid-file root))
       (fs/delete-if-exists (port-file root))
-      (println "Bridge stopped."))
-    (println "No bridge running.")))
+      (println (str "Bridge stopped for " root ".")))
+    (println (str "No bridge running for " root "."))))
 
 (defn cmd-status [root]
   (if (bridge-running? root)
     (let [resp (send-command root {:command "status"})]
-      (println (str "Bridge: running (PID " (read-pid root) ", port " (read-port root) ")"))
+      (println (str "Bridge: running for " root " (PID " (read-pid root) ", port " (read-port root) ")"))
       (when resp
         (println (str "Diagnostics cached: " (:diagnostics-count resp) " files"))))
-    (println "Bridge: not running")))
+    (println (str "Bridge: not running for " root))))
 
 (defn cmd-diagnostics [root {:keys [file]}]
   (ensure-bridge! root)
@@ -235,15 +264,19 @@
   (println "clj-lsp-client - Query interface for clj-lsp-bridge")
   (println)
   (println "Usage:")
-  (println "  clj-lsp-client start                          Start bridge (idempotent)")
-  (println "  clj-lsp-client stop                           Stop bridge")
-  (println "  clj-lsp-client status                         Check bridge status")
-  (println "  clj-lsp-client diagnostics [--file PATH]      Get diagnostics")
+  (println "  clj-lsp-client start [--project-root PATH]     Start bridge (idempotent)")
+  (println "  clj-lsp-client stop [--project-root PATH]      Stop bridge")
+  (println "  clj-lsp-client status [--project-root PATH]    Check bridge status")
+  (println "  clj-lsp-client diagnostics [--file PATH]       Get diagnostics")
   (println "  clj-lsp-client references --file PATH --line N --col N")
   (println "  clj-lsp-client definition --file PATH --line N --col N")
   (println "  clj-lsp-client hover --file PATH --line N --col N")
   (println)
-  (println "The bridge is auto-started when needed."))
+  (println "Project root is auto-detected from --file path (walks up to find")
+  (println "deps.edn/project.clj/bb.edn/shadow-cljs.edn). Falls back to CWD.")
+  (println "Use --project-root to override explicitly.")
+  (println)
+  (println "The bridge is auto-started per project when needed."))
 
 (defn parse-kv-args
   "Parse --key value pairs from args into a map."
@@ -262,8 +295,10 @@
 (defn -main [& args]
   (let [command (first args)
         rest-args (rest args)
-        root (project-root)
-        kv (parse-kv-args rest-args)]
+        kv (parse-kv-args rest-args)
+        ;; Resolve root: explicit --project-root > detect from --file > CWD
+        root (or (:project-root kv)
+                 (resolve-root kv))]
     (case command
       "start" (cmd-start root)
       "stop" (cmd-stop root)
