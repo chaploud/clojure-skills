@@ -6,7 +6,7 @@ Provides parenthesis repair, nREPL evaluation, and clojure-lsp integration for `
 
 ## Features
 
-- **Parenthesis Repair** — Auto-fix unbalanced delimiters via parinfer + cljfmt (Claude Code: automatic via hooks, others: `clj-paren-repair` command)
+- **Parenthesis Repair** — Auto-fix unbalanced delimiters via parinferish + cljfmt (Claude Code: automatic via hooks, others: `clj-paren-repair` command)
 - **REPL Evaluation** — `clj-nrepl-eval` with persistent sessions, timeout handling, and auto-discovery of nREPL servers
 - **Code Navigation** — Diagnostics, references, definition, hover via clojure-lsp bridge (per-project, auto-started)
 - **Multi-Project** — Detects project root from file path; works across multiple projects

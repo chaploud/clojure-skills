@@ -54,7 +54,7 @@ clojure-lsp is optional — without it, diagnostics/references/definition are un
 ## Parenthesis Repair
 
 Parenthesis repair runs **automatically** via hooks on every Write/Edit of Clojure files.
-It detects and fixes unbalanced delimiters using parinfer, then formats with cljfmt.
+It detects and fixes unbalanced delimiters using parinferish, then formats with cljfmt.
 
 ### Manual repair
 

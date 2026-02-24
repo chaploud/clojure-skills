@@ -1,8 +1,6 @@
 (ns clojure-skill.delimiter-repair
-  "Delimiter error detection and repair functions using edamame and parinfer-rust"
+  "Delimiter error detection and repair functions using edamame and parinferish"
   (:require [edamame.core :as e]
-            [clojure.java.shell :as shell]
-            [cheshire.core :as json]
             [clojure-skill.stats :as stats]
             [parinferish.core :as parinferish]))
 
@@ -43,8 +41,8 @@
   (binding [*signal-on-bad-parse* false]
     (delimiter-error? s)))
 
-(defn parinferish-repair
-  "Attempts to repair delimiter errors using parinferish (pure Clojure).
+(defn repair-delimiters
+  "Repairs delimiter errors using parinferish.
    Returns a map with:
    - :success - boolean indicating if repair was successful
    - :text - the repaired code (if successful)
@@ -59,49 +57,6 @@
     (catch Exception e
       {:success false
        :error (.getMessage e)})))
-
-(def parinfer-rust-available?
-  "Check if parinfer-rust binary is available on PATH.
-   Result is memoized to avoid repeated shell calls."
-  (memoize
-   (fn []
-     (try
-       (let [result (shell/sh "which" "parinfer-rust")]
-         (zero? (:exit result)))
-       (catch Exception _
-         false)))))
-
-(defn parinfer-repair
-  "Attempts to repair delimiter errors using parinfer-rust.
-   Returns a map with:
-   - :success - boolean indicating if repair was successful
-   - :repaired-text - the repaired code (if successful)
-   - :error - error message (if unsuccessful)"
-  [s]
-  (let [result (shell/sh "parinfer-rust"
-                         "--mode" "indent"
-                         "--language" "clojure"
-                         "--output-format" "json"
-                         :in s)
-        exit-code (:exit result)]
-    (if (zero? exit-code)
-      (try
-        (json/parse-string (:out result) true)
-        (catch Exception _
-          {:success false}))
-      {:success false})))
-
-(defn repair-delimiters
-  "Unified delimiter repair function that automatically selects the best available backend.
-   Prefers parinfer-rust (external tool) when available, falls back to parinferish (pure Clojure).
-   Returns a map with:
-   - :success - boolean indicating if repair was successful
-   - :text - the repaired code (if successful)
-   - :error - error message (if unsuccessful)"
-  [s]
-  (if (parinfer-rust-available?)
-    (parinfer-repair s)
-    (parinferish-repair s)))
 
 (defn fix-delimiters
   "Takes a Clojure string and attempts to fix delimiter errors.
