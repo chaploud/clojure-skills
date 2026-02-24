@@ -4,18 +4,33 @@
         dev.weavejester/cljfmt {:mvn/version "0.15.5"}}
 
  :tasks
- {install {:doc "Install all CLI tools via bbin"
-           :task (let [tools {"clj-paren-repair-claude-hook" "clojure-skill.hook"
-                              "clj-nrepl-eval" "clojure-skill.nrepl-eval"
-                              "clj-paren-repair" "clojure-skill.paren-repair"
-                              "clj-lsp-bridge" "clojure-skill.lsp-bridge"
-                              "clj-lsp-client" "clojure-skill.lsp-client"}
-                       dir (System/getProperty "user.dir")]
-                   (doseq [[tool-name main-ns] tools]
-                     (println (str "Installing " tool-name "..."))
-                     (shell "bbin" "install" "." "--as" tool-name
-                            "--main-opts" (str "[\"-m\" \"" main-ns "\"]")))
+ {install {:doc "Install all CLI tools and register hooks"
+           :task (do
+                   (let [tools {"clj-paren-repair-claude-hook" "clojure-skill.hook"
+                                "clj-nrepl-eval" "clojure-skill.nrepl-eval"
+                                "clj-paren-repair" "clojure-skill.paren-repair"
+                                "clj-lsp-bridge" "clojure-skill.lsp-bridge"
+                                "clj-lsp-client" "clojure-skill.lsp-client"}]
+                     (doseq [[tool-name main-ns] tools]
+                       (println (str "Installing " tool-name "..."))
+                       (shell "bbin" "install" "." "--as" tool-name
+                              "--main-opts" (str "[\"-m\" \"" main-ns "\"]"))))
+                   (require 'clojure-skill.claude-settings)
+                   ((resolve 'clojure-skill.claude-settings/install-hooks!))
                    (println "\nAll tools installed."))}
+
+  uninstall {:doc "Uninstall all CLI tools and remove hooks"
+             :task (do
+                     (require 'clojure-skill.claude-settings)
+                     ((resolve 'clojure-skill.claude-settings/uninstall-hooks!))
+                     (doseq [tool ["clj-paren-repair-claude-hook"
+                                   "clj-nrepl-eval"
+                                   "clj-paren-repair"
+                                   "clj-lsp-bridge"
+                                   "clj-lsp-client"]]
+                       (println (str "Uninstalling " tool "..."))
+                       (shell "bbin" "uninstall" tool))
+                     (println "\nAll tools uninstalled."))}
 
   test {:doc "Run tests"
         :extra-paths ["test"]

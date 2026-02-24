@@ -2,7 +2,7 @@
   "Unified temporary file management for Claude Code sessions.
 
   Provides consistent temp file paths for backups, nREPL sessions, and other
-  temporary files with automatic cleanup support via SessionEnd hooks."
+  temporary files with automatic cleanup support via Stop hooks."
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.string :as str]))
@@ -228,7 +228,7 @@
   of which ID was actually used during the session.
 
   Parameters:
-  - :session-id - Optional explicit session ID (e.g., from SessionEnd hook)
+  - :session-id - Optional explicit session ID (e.g., from Stop hook)
   - :gpid       - Optional grandparent process ID
 
   Returns a cleanup report map:

@@ -398,9 +398,9 @@
                       (assoc :tool_name "Edit")
                       (assoc-in [:tool_input :file_path] path)))))
 
-(defmethod process-hook ["SessionEnd" nil]
+(defmethod process-hook ["Stop" nil]
   [{:keys [session_id]}]
-  (timbre/info "SessionEnd: cleaning up session" session_id)
+  (timbre/info "Stop: cleaning up session" session_id)
   (try
     (let [report (tmp/cleanup-session! {:session-id session_id})]
       (timbre/info "  Cleanup attempted for session IDs:" (:attempted report))

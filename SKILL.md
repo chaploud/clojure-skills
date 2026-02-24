@@ -1,10 +1,13 @@
 ---
-name: clojure
+name: clojure-skills
 description: >-
   Clojure/ClojureScript/ClojureDart development skill. Activates when
   working with .clj, .cljs, .cljc, .cljd, .edn, .bb files. Provides
   parenthesis repair hooks, REPL evaluation via nREPL, and code
   navigation (diagnostics, references, definition) via clojure-lsp.
+compatibility: >-
+  Hooks (auto paren repair) require Claude Code. REPL evaluation and
+  code navigation work with any agent that has shell access.
 globs:
   - "**/*.clj"
   - "**/*.cljs"
@@ -24,7 +27,7 @@ hooks:
       hooks:
         - type: command
           command: "clj-paren-repair-claude-hook --cljfmt"
-  SessionEnd:
+  Stop:
     - hooks:
         - type: command
           command: "clj-paren-repair-claude-hook"
@@ -38,7 +41,7 @@ hooks:
 
 !`which bb 2>/dev/null && echo "✓ bb" || echo "✗ bb MISSING — install: brew install borkdude/brew/babashka (https://github.com/babashka/babashka#installation)"`
 !`which bbin 2>/dev/null && echo "✓ bbin" || echo "✗ bbin MISSING — install: bb install io.github.babashka/bbin (https://github.com/babashka/bbin)"`
-!`which clj-paren-repair-claude-hook 2>/dev/null && echo "✓ clj-tools" || echo "✗ clj-tools MISSING — install: cd ~/.claude/skills/clojure && bb install"`
+!`which clj-paren-repair-claude-hook 2>/dev/null && echo "✓ clj-tools" || echo "✗ clj-tools MISSING — install: cd ~/.claude/skills/clojure-skills && bb install"`
 !`which clojure-lsp 2>/dev/null && echo "✓ clojure-lsp" || echo "✗ clojure-lsp MISSING (optional) — install: brew install clojure-lsp/brew/clojure-lsp-native (https://clojure-lsp.io/installation/)"`
 
 If any **required** dependency (bb, bbin, clj-tools) shows ✗ MISSING:
@@ -163,7 +166,7 @@ clj-lsp-client stop                              # Stop bridge
 clj-lsp-client status                            # Check bridge status
 ```
 
-The bridge is automatically stopped on SessionEnd via hooks.
+The bridge is automatically stopped on Stop via hooks.
 
 ## Important Notes
 
