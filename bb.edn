@@ -4,7 +4,20 @@
         dev.weavejester/cljfmt {:mvn/version "0.15.5"}}
 
  :tasks
- {test {:doc "Run tests"
+ {install {:doc "Install all CLI tools via bbin"
+           :task (let [tools {"clj-paren-repair-claude-hook" "clojure-skill.hook"
+                              "clj-nrepl-eval" "clojure-skill.nrepl-eval"
+                              "clj-paren-repair" "clojure-skill.paren-repair"
+                              "clj-lsp-bridge" "clojure-skill.lsp-bridge"
+                              "clj-lsp-client" "clojure-skill.lsp-client"}
+                       dir (System/getProperty "user.dir")]
+                   (doseq [[tool-name main-ns] tools]
+                     (println (str "Installing " tool-name "..."))
+                     (shell "bbin" "install" "." "--as" tool-name
+                            "--main-opts" (str "[\"-m\" \"" main-ns "\"]")))
+                   (println "\nAll tools installed."))}
+
+  test {:doc "Run tests"
         :extra-paths ["test"]
         :extra-deps {io.github.cognitect-labs/test-runner
                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}

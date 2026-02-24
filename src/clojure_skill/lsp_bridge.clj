@@ -428,12 +428,33 @@
 ;; CLI
 ;; ============================================================================
 
+(defn show-help []
+  (println "clj-lsp-bridge - TCP bridge wrapping clojure-lsp")
+  (println)
+  (println "Usage:")
+  (println "  clj-lsp-bridge start [PROJECT-ROOT]   Start bridge (default: cwd)")
+  (println "  clj-lsp-bridge stop [PROJECT-ROOT]    Stop running bridge")
+  (println)
+  (println "The bridge starts clojure-lsp as a subprocess, communicates via")
+  (println "LSP stdio protocol, and listens on a localhost TCP port for")
+  (println "client queries from clj-lsp-client.")
+  (println)
+  (println "Files created in PROJECT-ROOT/.lsp/:")
+  (println "  .clj-lsp-bridge.port  — TCP port number")
+  (println "  .clj-lsp-bridge.pid   — bridge process PID"))
+
 (defn -main [& args]
   (let [command (first args)]
     (case command
+      ("--help" "-h") (show-help)
       "start" (let [project-root (or (second args) (System/getProperty "user.dir"))]
                 (run-bridge project-root))
       "stop"  (let [project-root (or (second args) (System/getProperty "user.dir"))]
                 (stop-bridge project-root))
-      ;; Default: start
-      (run-bridge (or (first args) (System/getProperty "user.dir"))))))
+      (nil) (run-bridge (System/getProperty "user.dir"))
+      ;; Unknown arg — show help
+      (do
+        (println (str "Unknown command: " command))
+        (println)
+        (show-help)
+        (System/exit 1)))))

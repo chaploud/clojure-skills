@@ -29,13 +29,16 @@ git clone https://github.com/your-user/clojure-claude-skill.git ~/Documents/MyPr
 
 cd ~/Documents/MyProducts/clojure-claude-skill
 
-# Install CLI tools via bbin
-bbin install .
+# Install all CLI tools via bb task
+bb install
 
 # Create skill symlink
 mkdir -p ~/.claude/skills
 ln -s ~/Documents/MyProducts/clojure-claude-skill ~/.claude/skills/clojure
 ```
+
+> **Note:** `bb install` runs `bbin install` for each tool individually.
+> `bbin install .` alone only installs the first tool from `:bbin/bin`.
 
 ### Verify
 
