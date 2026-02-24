@@ -199,7 +199,7 @@
              :env-type nil
              :project-dir nil
              :matches-cwd false}))))
-    (catch Exception _
+    (catch Exception e
       ;; Connection failed
       {:host host
        :port port
@@ -208,7 +208,8 @@
        :session-count 0
        :env-type nil
        :project-dir nil
-       :matches-cwd false})))
+       :matches-cwd false
+       :error (.getMessage e)})))
 
 (defn discover-nrepl-ports
   "Discover potential nREPL ports by:
@@ -336,31 +337,58 @@
   [{:keys [host port expr timeout-ms] :or {timeout-ms 120000}}]
   (let [fixed-expr (or (fix-delimiters expr) expr)
         host (or host "localhost")]
-    (nc/with-socket host (nc/coerce-long port) timeout-ms
-      (fn [socket out in]
-        (let [conn (nc/make-connection socket out in host port)
-              session-data (ensure-session conn)
-              session-id (:session-id session-data)
-              env-type (or (:env-type session-data) :unknown)
-              conn-with-session (assoc conn :session-id session-id)
-              ;; Detect CLJS mode only for shadow-cljs environments
-              cljs-mode? (when (= env-type :shadow)
-                           (detect-cljs-mode conn-with-session))
-              eval-id (nc/next-id)]
-          (try
-            ;; Evaluate expression using messages-for-id
-            (let [messages (nc/messages-for-id
-                            conn-with-session
-                            {"op" "eval"
-                             "code" fixed-expr
-                             "id" eval-id})]
-              (output-messages messages env-type cljs-mode?))
-            (catch java.net.SocketTimeoutException _
-              (println "\n⚠️  Timeout hit, sending nREPL :interrupt …")
-              (nc/write-bencode-msg out {"op" "interrupt"
-                                         "session" session-id
-                                         "interrupt-id" eval-id})
-              (println "✋ Evaluation interrupted."))))))))
+    (try
+      (nc/with-socket host (nc/coerce-long port) timeout-ms
+        (fn [socket out in]
+          (let [conn (nc/make-connection socket out in host port)
+                session-data (ensure-session conn)
+                session-id (:session-id session-data)
+                env-type (or (:env-type session-data) :unknown)
+                conn-with-session (assoc conn :session-id session-id)
+                ;; Detect CLJS mode only for shadow-cljs environments
+                cljs-mode? (when (= env-type :shadow)
+                             (detect-cljs-mode conn-with-session))
+                eval-id (nc/next-id)]
+            (try
+              ;; Evaluate expression using messages-for-id
+              (let [messages (nc/messages-for-id
+                              conn-with-session
+                              {"op" "eval"
+                               "code" fixed-expr
+                               "id" eval-id})]
+                (output-messages messages env-type cljs-mode?))
+              (catch java.net.SocketTimeoutException _
+                (println "\n⚠️  Timeout hit, sending nREPL :interrupt …")
+                (nc/write-bencode-msg out {"op" "interrupt"
+                                           "session" session-id
+                                           "interrupt-id" eval-id})
+                (println "✋ Evaluation interrupted."))))))
+      (catch java.net.ConnectException _
+        (binding [*out* *err*]
+          (println (str "❌ Connection refused: " host ":" port))
+          (println "   The nREPL server may not be running.")
+          (println "   Use --discover-ports to find available nREPL servers."))
+        (System/exit 1))
+      (catch java.io.EOFException e
+        (binding [*out* *err*]
+          (println (str "❌ nREPL protocol error: " (.getMessage e)))
+          (println)
+          (println "Possible causes:")
+          (println (str "  - Server at " host ":" port " is not using bencode transport"))
+          (println "  - nREPL server restarted or session became unstable")
+          (println "  - Docker container's nREPL needs restart")
+          (println)
+          (println "Try:")
+          (println "  1. Restart the nREPL server")
+          (println (str "  2. clj-nrepl-eval -p " port " --reset-session"))
+          (println "  3. clj-nrepl-eval --discover-ports"))
+        (System/exit 1))
+      (catch Exception e
+        (binding [*out* *err*]
+          (println (str "❌ nREPL error: " (.getMessage e)))
+          (println (str "   Connection to " host ":" port " failed."))
+          (println "   Use --discover-ports to find available nREPL servers."))
+        (System/exit 1)))))
 
 ;; ============================================================================
 ;; Command-line interface
@@ -530,7 +558,14 @@
                              (format " (%d in current directory, %d in other directories)"
                                      current-count
                                      other-count)
-                             ""))))))))
+                             ""))))))
+    ;; Show unreachable ports
+    (let [invalid-servers (remove :valid discovered)]
+      (when (seq invalid-servers)
+        (println)
+        (println "Unreachable ports (not responding to nREPL bencode):")
+        (doseq [{:keys [host port error]} invalid-servers]
+          (println (format "  %s:%d - %s" host port (or error "unknown error"))))))))
 
 (defn handle-reset-session
   "Handler for --reset-session flag.
