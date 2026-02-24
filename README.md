@@ -23,8 +23,8 @@ Provides parenthesis repair, nREPL evaluation, and clojure-lsp integration for `
 ## Install
 
 ```bash
-git clone https://github.com/chaploud/clojure-skills.git
-cd clojure-skills
+git clone https://github.com/chaploud/clojure-skills.git ~/clojure-skills
+cd ~/clojure-skills
 
 # Install CLI tools + register Claude Code hooks
 bb install
@@ -36,32 +36,20 @@ bb install
 
 Running `bb install` again is safe (idempotent). Hook registration is Claude Code specific; Codex/Gemini users only need step 1 (the tools).
 
-### Register as a skill
-
-Register the skill for whichever agents you use:
+Then register the skill for whichever agents you use:
 
 ```bash
 # Claude Code
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)" ~/.claude/skills/clojure-skills
+ln -s ~/clojure-skills ~/.claude/skills/clojure-skills
 
 # Codex CLI
 mkdir -p ~/.agents/skills
-ln -s "$(pwd)" ~/.agents/skills/clojure-skills
+ln -s ~/clojure-skills ~/.agents/skills/clojure-skills
 
 # Gemini CLI
 mkdir -p ~/.gemini/skills
-ln -s "$(pwd)" ~/.gemini/skills/clojure-skills
-```
-
-For project-level (shared with team), symlink into the project instead:
-
-```bash
-# Claude Code
-ln -s /path/to/clojure-skills .claude/skills/clojure-skills
-
-# Codex CLI / Gemini CLI (cross-platform alias)
-ln -s /path/to/clojure-skills .agents/skills/clojure-skills
+ln -s ~/clojure-skills ~/.gemini/skills/clojure-skills
 ```
 
 ## Usage
