@@ -26,7 +26,7 @@ Choose where to clone (the path will be embedded in the tools):
 
 ```bash
 # Clone
-git clone https://github.com/shotahorii/clojure-claude-skill.git
+git clone https://github.com/chaploud/clojure-claude-skill.git
 cd clojure-claude-skill
 
 # Install all 5 CLI tools
