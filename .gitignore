@@ -1,0 +1,8 @@
+.cpcache/
+.nrepl-port
+target/
+.clj-kondo/.cache/
+.lsp/.cache/
+.lsp/.clj-lsp-bridge.*
+*.log
+.clojure-skill/

@@ -1,0 +1,20 @@
+{:paths ["src"]
+
+ :deps {parinferish/parinferish {:mvn/version "0.8.0"}
+        dev.weavejester/cljfmt {:mvn/version "0.15.5"}}
+
+ :tasks
+ {test {:doc "Run tests"
+        :extra-paths ["test"]
+        :extra-deps {io.github.cognitect-labs/test-runner
+                     {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+        :task (exec 'cognitect.test-runner.api/test)
+        :exec-args {:dirs ["test"]}
+        :org.babashka/cli {:coerce {:nses [:symbol]
+                                    :vars [:symbol]}}}}
+
+ :bbin/bin {clj-paren-repair-claude-hook {:main-opts ["-m" "clojure-skill.hook"]}
+            clj-nrepl-eval {:main-opts ["-m" "clojure-skill.nrepl-eval"]}
+            clj-paren-repair {:main-opts ["-m" "clojure-skill.paren-repair"]}
+            clj-lsp-bridge {:main-opts ["-m" "clojure-skill.lsp-bridge"]}
+            clj-lsp-client {:main-opts ["-m" "clojure-skill.lsp-client"]}}}
