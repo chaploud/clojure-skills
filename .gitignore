@@ -1,7 +1,7 @@
 .cpcache/
 .nrepl-port
 target/
-.clj-kondo/.cache/
+.clj-kondo/
 .lsp/.cache/
 .lsp/.clj-lsp-bridge.*
 *.log
