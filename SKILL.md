@@ -3,11 +3,11 @@ name: clojure-skills
 description: >-
   Clojure/ClojureScript/ClojureDart development skill. Activates when
   working with .clj, .cljs, .cljc, .cljd, .edn, .bb files. Provides
-  parenthesis repair hooks, REPL evaluation via nREPL, and code
+  parenthesis repair tools, REPL evaluation via nREPL, and code
   navigation (diagnostics, references, definition) via clojure-lsp.
 compatibility: >-
-  Hooks (auto paren repair) require Claude Code. REPL evaluation and
-  code navigation work with any agent that has shell access.
+  REPL evaluation and code navigation work with any agent that has
+  shell access. Optional paren-repair hooks require Claude Code.
 globs:
   - "**/*.clj"
   - "**/*.cljs"
@@ -17,20 +17,8 @@ globs:
   - "**/*.bb"
 user-invocable: false
 hooks:
-  PreToolUse:
-    - matcher: "Write|Edit"
-      hooks:
-        - type: command
-          command: "clj-paren-repair-claude-hook --cljfmt"
-  PostToolUse:
-    - matcher: "Edit|Write"
-      hooks:
-        - type: command
-          command: "clj-paren-repair-claude-hook --cljfmt"
   Stop:
     - hooks:
-        - type: command
-          command: "clj-paren-repair-claude-hook"
         - type: command
           command: "clj-lsp-client stop 2>/dev/null; true"
 ---
@@ -45,18 +33,17 @@ hooks:
 !`which clojure-lsp 2>/dev/null && echo "✓ clojure-lsp" || echo "✗ clojure-lsp MISSING (optional) — install: brew install clojure-lsp/brew/clojure-lsp-native (https://clojure-lsp.io/installation/)"`
 
 If any **required** dependency (bb, bbin, clj-tools) shows ✗ MISSING:
-1. **STOP** immediately — do not attempt Clojure file edits without the hooks working
-2. Show the user the exact install command from the line above
-3. After install, the hooks will activate automatically on next Write/Edit
+1. Show the user the exact install command from the line above
+2. After install, tools will be available
 
 clojure-lsp is optional — without it, diagnostics/references/definition are unavailable but paren repair and REPL evaluation still work.
 
 ## Parenthesis Repair
 
-Parenthesis repair runs **automatically** via hooks on every Write/Edit of Clojure files.
-It detects and fixes unbalanced delimiters using parinferish, then formats with cljfmt.
+By default, parenthesis repair does **not** run automatically.
+Users can opt in via `bb install-hooks` to register PreToolUse/PostToolUse hooks.
 
-### Manual repair
+### Manual repair (always available)
 
 ```bash
 clj-paren-repair <files...>
@@ -172,7 +159,7 @@ The bridge is automatically stopped on Stop via hooks.
 
 - **All Clojure variants supported**: .clj, .cljs, .cljc, .cljd, .edn, .bb, .lpy
 - **ClojureDart (.cljd)**: Reader conditionals with `:cljd` feature are fully supported
-- **Parenthesis repair is automatic**: Hooks fire on every Write/Edit — you don't need to run it manually unless troubleshooting
+- **Parenthesis repair is opt-in**: Run `bb install-hooks` to enable automatic hooks, or use `clj-paren-repair` manually
 - **REPL state persists**: Each host:port has its own persistent session. Use `--reset-session` to start fresh
 - **LSP bridge is per-project**: Each project gets its own bridge instance, auto-detected from file paths
 - **Line numbers**: `clj-lsp-client` uses 1-based line numbers and 0-based column numbers (matching Emacs conventions)

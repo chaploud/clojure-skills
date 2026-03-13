@@ -4,7 +4,7 @@
         dev.weavejester/cljfmt {:mvn/version "0.15.5"}}
 
  :tasks
- {install {:doc "Install all CLI tools and register hooks"
+ {install {:doc "Install all CLI tools (paren-repair hooks are opt-in; use `bb install-hooks`)"
            :task (do
                    (let [tools {"clj-paren-repair-claude-hook" "clojure-skill.hook"
                                 "clj-nrepl-eval" "clojure-skill.nrepl-eval"
@@ -15,9 +15,8 @@
                        (println (str "Installing " tool-name "..."))
                        (shell "bbin" "install" "." "--as" tool-name
                               "--main-opts" (str "[\"-m\" \"" main-ns "\"]"))))
-                   (require 'clojure-skill.claude-settings)
-                   ((resolve 'clojure-skill.claude-settings/install-hooks!))
-                   (println "\nAll tools installed."))}
+                   (println "\nAll tools installed.")
+                   (println "To enable auto paren-repair hooks: bb install-hooks"))}
 
   uninstall {:doc "Uninstall all CLI tools and remove hooks"
              :task (do
@@ -31,6 +30,16 @@
                        (println (str "Uninstalling " tool "..."))
                        (shell "bbin" "uninstall" tool))
                      (println "\nAll tools uninstalled."))}
+
+  install-hooks {:doc "Register paren-repair hooks in ~/.claude/settings.json (opt-in)"
+                 :task (do
+                         (require 'clojure-skill.claude-settings)
+                         ((resolve 'clojure-skill.claude-settings/install-hooks!)))}
+
+  uninstall-hooks {:doc "Remove paren-repair hooks from ~/.claude/settings.json"
+                   :task (do
+                           (require 'clojure-skill.claude-settings)
+                           ((resolve 'clojure-skill.claude-settings/uninstall-hooks!)))}
 
   test {:doc "Run tests"
         :extra-paths ["test"]

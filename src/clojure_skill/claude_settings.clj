@@ -1,5 +1,6 @@
 (ns clojure-skill.claude-settings
-  "Install/uninstall hooks in ~/.claude/settings.json"
+  "Install/uninstall paren-repair hooks in ~/.claude/settings.json.
+   Hooks are NOT installed by default — use `bb install-hooks` to opt in."
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
             [clojure.string :as string]))
