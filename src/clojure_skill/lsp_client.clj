@@ -195,7 +195,7 @@
                 (println (format "%s:%d:%d: %s - %s"
                                  file
                                  (inc (:line start))
-                                 (:character start)
+                                 (inc (:character start))
                                  (get {1 "Error" 2 "Warning" 3 "Info" 4 "Hint"} (:severity d) "Unknown")
                                  (:message d)))))
             (println (str "No diagnostics for " file))))
@@ -211,7 +211,7 @@
                     (println (format "%s:%d:%d: %s - %s"
                                      fpath
                                      (inc (:line start))
-                                     (:character start)
+                                     (inc (:character start))
                                      (get {1 "Error" 2 "Warning" 3 "Info" 4 "Hint"} (:severity d) "Unknown")
                                      (:message d)))))))
             (println "No diagnostics.")))))))

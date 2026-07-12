@@ -101,8 +101,23 @@
 (defn file->uri [path]
   (str (.toURI (io/file path))))
 
-(defn uri->file [uri]
-  (str/replace-first uri #"^file://" ""))
+(defn uri->file
+  "Convert an LSP location URI to a readable path.
+  file://…                → /abs/path
+  zipfile://…jar::inner   → /abs/to.jar:inner   (jar 内定義)
+  jar:file://…jar!/inner  → /abs/to.jar:inner"
+  [uri]
+  (cond
+    (str/starts-with? uri "file://")
+    (str/replace-first uri #"^file://" "")
+
+    (str/starts-with? uri "zipfile://")
+    (-> uri (str/replace-first #"^zipfile://" "") (str/replace "::" ":"))
+
+    (str/starts-with? uri "jar:file://")
+    (-> uri (str/replace-first #"^jar:file://" "") (str/replace "!/" ":"))
+
+    :else uri))
 
 (defn start-lsp-process
   "Start clojure-lsp as subprocess in stdio mode.
@@ -217,29 +232,29 @@
     {:diagnostics @diagnostics-cache}))
 
 (defn handle-references
-  "Find references for symbol at position."
+  "Find references for symbol at position (line/col は 1-based)."
   [lsp-out {:keys [file line col]}]
   (let [uri (file->uri file)
         resp (send-lsp-request! lsp-out "textDocument/references"
                                 {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character col}
+                                 :position {:line (dec line) :character (dec col)}
                                  :context {:includeDeclaration true}})]
     {:references
      (mapv (fn [loc]
              {:file (uri->file (:uri loc))
               :line (inc (get-in loc [:range :start :line]))
-              :col (get-in loc [:range :start :character])
+              :col (inc (get-in loc [:range :start :character]))
               :end-line (inc (get-in loc [:range :end :line]))
-              :end-col (get-in loc [:range :end :character])})
+              :end-col (inc (get-in loc [:range :end :character]))})
            (:result resp))}))
 
 (defn handle-definition
-  "Go to definition for symbol at position."
+  "Go to definition for symbol at position (line/col は 1-based)."
   [lsp-out {:keys [file line col]}]
   (let [uri (file->uri file)
         resp (send-lsp-request! lsp-out "textDocument/definition"
                                 {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character col}})]
+                                 :position {:line (dec line) :character (dec col)}})]
     (let [result (:result resp)
           ;; clojure-lsp may return a single location or array
           locs (if (map? result) [result] result)]
@@ -247,16 +262,16 @@
        (mapv (fn [loc]
                {:file (uri->file (:uri loc))
                 :line (inc (get-in loc [:range :start :line]))
-                :col (get-in loc [:range :start :character])})
+                :col (inc (get-in loc [:range :start :character]))})
              locs)})))
 
 (defn handle-hover
-  "Get hover information for symbol at position."
+  "Get hover information for symbol at position (line/col は 1-based)."
   [lsp-out {:keys [file line col]}]
   (let [uri (file->uri file)
         resp (send-lsp-request! lsp-out "textDocument/hover"
                                 {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character col}})]
+                                 :position {:line (dec line) :character (dec col)}})]
     {:hover (get-in resp [:result :contents])}))
 
 (defn handle-client-command
@@ -369,6 +384,37 @@
     (cleanup-pid-port-files! project-root)))
 
 ;; ============================================================================
+;; Cache Warm (one-shot, no TCP server)
+;; ============================================================================
+
+(defn warm-cache
+  "Run a one-shot full-deps clojure-lsp stdio session to persist a
+  server-reusable analysis cache, then exit.
+
+  clojure-lsp writes .lsp/.cache/db.transit.json only during startup
+  analysis, and the LSP server path uses :project-and-full-dependencies
+  (unlike the CLI `diagnostics`, which writes a server-incompatible
+  :project-only cache). Running this ahead of time (login / worktree
+  post-create) makes the first eglot / bridge start fast (warm initialize)."
+  [project-root]
+  (let [project-root (or project-root (System/getProperty "user.dir"))
+        lsp-process (start-lsp-process project-root)
+        lsp-out (.getOutputStream lsp-process)
+        lsp-reader (BufferedReader. (InputStreamReader. (.getInputStream lsp-process) StandardCharsets/UTF_8))]
+    (println (str "Warming clojure-lsp cache for " project-root " ..."))
+    ;; initialize は解析(+ cache 書込)完了後に応答するため、ここまで待てば warm 完了
+    (initialize-lsp lsp-out lsp-reader project-root)
+    ;; 明示 shutdown/exit で cache flush を確実化してからプロセス終了
+    (try
+      (write-lsp-message lsp-out (make-lsp-request "shutdown" nil))
+      (Thread/sleep 1000)
+      (write-lsp-message lsp-out (make-lsp-notification "exit" {}))
+      (catch Exception _ nil))
+    (Thread/sleep 500)
+    (.destroy lsp-process)
+    (println "Cache warmed.")))
+
+;; ============================================================================
 ;; Main Bridge Loop
 ;; ============================================================================
 
@@ -434,6 +480,7 @@
   (println "Usage:")
   (println "  clj-lsp-bridge start [PROJECT-ROOT]   Start bridge (default: cwd)")
   (println "  clj-lsp-bridge stop [PROJECT-ROOT]    Stop running bridge")
+  (println "  clj-lsp-bridge warm [PROJECT-ROOT]    Warm the analysis cache and exit (no server)")
   (println)
   (println "The bridge starts clojure-lsp as a subprocess, communicates via")
   (println "LSP stdio protocol, and listens on a localhost TCP port for")
@@ -451,6 +498,8 @@
                 (run-bridge project-root))
       "stop"  (let [project-root (or (second args) (System/getProperty "user.dir"))]
                 (stop-bridge project-root))
+      "warm"  (let [project-root (or (second args) (System/getProperty "user.dir"))]
+                (warm-cache project-root))
       (nil) (run-bridge (System/getProperty "user.dir"))
       ;; Unknown arg — show help
       (do

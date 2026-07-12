@@ -162,5 +162,6 @@ The bridge is automatically stopped on Stop via hooks.
 - **Parenthesis repair is opt-in**: Run `bb install-hooks` to enable automatic hooks, or use `clj-paren-repair` manually
 - **REPL state persists**: Each host:port has its own persistent session. Use `--reset-session` to start fresh
 - **LSP bridge is per-project**: Each project gets its own bridge instance, auto-detected from file paths
-- **Line numbers**: `clj-lsp-client` uses 1-based line numbers and 0-based column numbers (matching Emacs conventions)
+- **Coordinates**: `clj-lsp-client` uses **1-based line AND column** numbers (editor-style Ln:Col). Input `--line`/`--col` and the `line:col` in output are both 1-based.
+- **Jar definitions**: when `definition`/`references` point into a dependency jar, the path is shown as `/abs/to/foo.jar:inner/ns.clj:LINE:COL`
 - **Always use heredoc** for `clj-nrepl-eval`: `<<'EOF' ... EOF` — never use quoted argument style
