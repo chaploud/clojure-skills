@@ -9,7 +9,8 @@
             [babashka.process :as process]
             [cheshire.core :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure-skill.tmp :as tmp])
   (:import [java.net Socket]))
 
 (def project-markers
@@ -45,7 +46,17 @@
 
 (defn pid-file [root] (str (fs/path root ".lsp" ".clj-lsp-bridge.pid")))
 (defn port-file [root] (str (fs/path root ".lsp" ".clj-lsp-bridge.port")))
-(defn log-file [root] (str (fs/path root ".lsp" "clj-lsp-bridge.log")))
+
+(defn log-file
+  "Where the bridge writes its own output.
+
+  Kept outside the project: a log inside .lsp/ shows up as an untracked file in
+  every repo whose .gitignore predates it, and nothing about a debug log needs to
+  live in the user's working tree."
+  [root]
+  (str (fs/path (or (System/getenv "XDG_CACHE_HOME") (fs/path (fs/home) ".cache"))
+                "clj-skill" "lsp-bridge"
+                (str (tmp/sha1 (str (fs/absolutize root))) ".log"))))
 
 (defn- read-number [path]
   (try
@@ -88,8 +99,8 @@
   ;; the write end of the pipe open keeps a `… | head` from ever seeing EOF, and
   ;; the caller hangs long after the query itself finished. Its output goes to a
   ;; log beside the pid and port files instead.
-  (fs/create-dirs (fs/path root ".lsp"))
   (let [log (fs/file (log-file root))]
+    (fs/create-dirs (fs/parent log))
     (process/process ["clj-skill" "lsp-bridge" "start" root]
                      {:dir root :out log :err log}))
   (loop [waited 0]

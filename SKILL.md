@@ -177,9 +177,20 @@ clj-skill cider inspect '(big-thing)'        # paged view instead of the whole v
 clj-skill cider ops                          # what this server supports
 ```
 
-`test` reports only what broke, and exits non-zero when anything did.
+`test` reports only what broke, and exits non-zero when anything did. It can only
+run namespaces the REPL has already loaded, so require the test namespace first:
+
+```bash
+clj-skill repl eval -p 7888 "(require 'my.ns-test :reload)"
+clj-skill cider test -p 7888 my.ns-test
+```
+
 `stacktrace` reads the exception raised by the last `repl eval` — the session is
 shared — and prints only frames in project code; pass `--all` for the rest.
+
+`refs` and `deps` read Clojure vars on the JVM. On a ClojureScript session they
+say so and exit non-zero rather than reporting no callers; use
+`clj-skill lsp references` there.
 
 If the server lacks cider-nrepl, each command says so and names the static
 alternative. `clj-skill cider ops` lists what the server does support.
@@ -199,6 +210,9 @@ walking up from `--file` to the nearest `deps.edn`/`project.clj`/`bb.edn`/
 
 A definition inside a dependency is printed as `/abs/to/foo.jar:inner/ns.clj:LINE:COL`.
 
+The bridge writes its own output to
+`~/.cache/clj-skill/lsp-bridge/<hash>.log` — read it when a query times out.
+
 The first start on a cold, large project can take minutes while clojure-lsp
 indexes. Run `clj-skill lsp-bridge warm ROOT` ahead of time — at login, or after
 creating a worktree — to do that indexing before it is needed.
@@ -213,3 +227,5 @@ creating a worktree — to do that indexing before it is needed.
 - A command that could not do its job exits non-zero and says why on stderr.
   `;; no match` and `;; no references` mean the search ran and found nothing —
   they are never printed for a search that failed
+- `find` stops at `--limit` matches, so files after that point are not read.
+  When the count matters, raise the limit

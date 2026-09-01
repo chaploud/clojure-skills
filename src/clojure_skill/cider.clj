@@ -47,6 +47,23 @@
   failing `cider test` would report a green run."
   #{"error" "unknown-op" "eval-error" "namespace-not-found" "interrupted"})
 
+(defn- cljs-session?
+  "Whether this session evaluates ClojureScript.
+
+  shadow-cljs switches an nREPL session between Clojure and ClojureScript at
+  runtime, so the answer belongs to the session rather than to the server, and it
+  has to be asked on the same connection the query uses."
+  [conn]
+  (let [r (nc/send-op conn {"op" "eval" "code" "*clojurescript-version*"})]
+    (boolean (and (seq (:value r))
+                  (not (some #{"eval-error"} (:status r)))))))
+
+(def ^:private jvm-only-ops
+  "Ops backed by orchard's JVM var analysis. They answer on a ClojureScript
+  session but always answer \"nothing\", which reads as a fact rather than as a
+  gap — the failure this tool exists to avoid."
+  {"fn-refs" "callers" "fn-deps" "callees"})
+
 (defn- send-op!
   "Send op-map when the server supports its op, otherwise explain what is missing.
 
@@ -105,10 +122,13 @@
   "List the ops this server supports, and say whether cider-nrepl is loaded."
   [opts]
   (with-session opts
-    (fn [_ session]
-      (println (format ";; env: %s" (name (:env-type session))))
+    (fn [conn session]
+      (println (format ";; env: %s%s" (name (:env-type session))
+                       (if (cljs-session? conn) " (evaluating ClojureScript)" "")))
       (println (format ";; cider-nrepl: %s"
                        (if (contains? (:ops session) "fn-refs") "yes" "no")))
+      (when (cljs-session? conn)
+        (println ";; refs and deps read JVM vars and cannot answer here — use `clj-skill lsp references`"))
       (run! println (sort (:ops session)))
       0)))
 
@@ -134,11 +154,18 @@
   (with-session opts
     (fn [conn session]
       (if-let [r (send-op! conn session {"op" op "sym" sym "ns" (or ns "user")})]
-        (do
-          (if-let [entries (seq (get r result-key))]
-            (run! (comp println format-location) entries)
-            (println (format ";; %s for %s" empty-msg sym)))
-          0)
+        (if-let [entries (seq (get r result-key))]
+          (do (run! (comp println format-location) entries) 0)
+          ;; Only probe once the answer is empty: an empty result is the only one
+          ;; a ClojureScript session could be silently wrong about.
+          (if (cljs-session? conn)
+            (do (binding [*out* *err*]
+                  (println (format "%s cannot be answered for ClojureScript: %s reads Clojure vars on the JVM, so it reports no %s whatever the truth is."
+                                   op op (jvm-only-ops op "results")))
+                  (println "use the static index instead:")
+                  (println "  clj-skill lsp references --file FILE --line N --col N"))
+                1)
+            (do (println (format ";; %s for %s" empty-msg sym)) 0)))
         1))))
 
 (defn refs

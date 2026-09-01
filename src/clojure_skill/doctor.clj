@@ -78,6 +78,10 @@
     (line lsp? "lsp (clojure-lsp)"
           (if lsp? "diagnostics / references / definition / hover"
               "brew install clojure-lsp/brew/clojure-lsp-native"))
+    (when lsp?
+      (line true "  bridge log"
+            (str (fs/path (or (System/getenv "XDG_CACHE_HOME") (fs/path (fs/home) ".cache"))
+                          "clj-skill" "lsp-bridge"))))
     (line kondo? "  clj-kondo"
           (if kondo? "backs clojure-lsp's analysis" "installed with clojure-lsp")
           :optional)
