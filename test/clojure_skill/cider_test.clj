@@ -11,6 +11,7 @@
 (def ^:private format-location #'cider/format-location)
 (def ^:private print-test-failures #'cider/print-test-failures)
 (def ^:private report-run #'cider/report-run)
+(def ^:private context-label #'cider/context-label)
 (def ^:private static-alternatives @#'cider/static-alternatives)
 
 (deftest file-urls-become-plain-paths
@@ -54,6 +55,17 @@
                                               "doc" "(not documented)"})))
   (is (str/includes? (format-location {"file" "a.clj" "line" 3 "name" "my.ns/f" "doc" "adds"})
                      ";; adds")))
+
+(deftest a-testing-context-is-one-line-not-one-character-per-form
+  (testing "cider-nrepl joins nested testing strings into a single string; treating
+            it as a collection splits it character by character"
+    (is (= " 表紙に図があるマニュアル ネストしたコンテキスト"
+           (context-label "表紙に図があるマニュアル\n  ネストしたコンテキスト")))
+    (is (= " outer / inner" (context-label ["outer" "inner"]))
+        "an older server that sends a vector still reads correctly")
+    (is (nil? (context-label [])))
+    (is (nil? (context-label "")))
+    (is (nil? (context-label nil)))))
 
 (deftest only-failing-assertions-are-printed
   (testing "the whole point of `cider test` is to hand back what broke, not a log"
