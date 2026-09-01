@@ -81,6 +81,51 @@
          (some-> (java.lang.ProcessHandle/of pid) (.orElse nil) .isAlive)
          (catch Exception _ false))))))
 
+(defn- bridge-processes
+  "Live bridge processes started for root, found by their command line.
+
+  Needed because the pid file and the process can disagree in either direction,
+  and only one of the two costs memory: a bridge whose files were removed keeps
+  running, with clojure-lsp and its index still resident. The reverse — files
+  left behind by a bridge killed with SIGKILL — is harmless, and clojure-lsp
+  follows its parent down on its own, since it exits when the stdin pipe it
+  reads closes."
+  [root]
+  (let [marker (str "lsp-bridge start " root)]
+    (->> (java.lang.ProcessHandle/allProcesses)
+         .toList
+         (filter #(some-> (.info ^java.lang.ProcessHandle %)
+                          .commandLine (.orElse nil)
+                          (str/includes? marker)))
+         vec)))
+
+(defn- exited?
+  "Whether handle finished within timeout-ms."
+  [^java.lang.ProcessHandle handle timeout-ms]
+  (try
+    (.get (.onExit handle) timeout-ms java.util.concurrent.TimeUnit/MILLISECONDS)
+    true
+    (catch java.util.concurrent.TimeoutException _ false)
+    (catch Exception _ (not (.isAlive handle)))))
+
+(defn- terminate!
+  "Ask a process and its children to exit, then force whatever is left.
+
+  SIGTERM first so the bridge's shutdown hook gets to stop clojure-lsp; killing
+  the parent outright would leave the language server running with its index
+  still in memory. The children are collected before signalling, because a dead
+  parent no longer reports them."
+  [^java.lang.ProcessHandle handle]
+  (let [children (vec (.toList (.descendants handle)))]
+    (.destroy handle)
+    (when-not (exited? handle 2000)
+      (.destroyForcibly handle))
+    (doseq [^java.lang.ProcessHandle child children
+            :when (.isAlive child)]
+      (.destroy child)
+      (when-not (exited? child 1000)
+        (.destroyForcibly child)))))
+
 (def ^:private start-timeout-ms 180000)
 (def ^:private start-poll-ms 500)
 
@@ -92,6 +137,12 @@
   Indexing a cold monorepo can take minutes, so progress is reported while
   waiting — silence here is indistinguishable from a hang."
   [root]
+  ;; Reclaim an orphan first. Its port file is gone, so nothing can reach it, and
+  ;; leaving it running would mean two clojure-lsp processes each holding a full
+  ;; index of the same project.
+  (doseq [handle (bridge-processes root)]
+    (println (format ";; reclaiming an unreachable bridge (pid %s)" (.pid ^java.lang.ProcessHandle handle)))
+    (try (terminate! handle) (catch Exception _ nil)))
   (println (format ";; clojure-lsp is indexing %s — the first query waits for this." root))
   (println ";; run `clj-skill lsp-bridge warm ROOT` ahead of time to avoid the wait.")
   (flush)
@@ -250,51 +301,6 @@
         0)
     (start! root)))
 
-(defn- bridge-processes
-  "Live bridge processes started for root, found by their command line.
-
-  Needed because the pid file and the process can disagree in either direction,
-  and only one of the two costs memory: a bridge whose files were removed keeps
-  running, with clojure-lsp and its index still resident. The reverse — files
-  left behind by a bridge killed with SIGKILL — is harmless, and clojure-lsp
-  follows its parent down on its own, since it exits when the stdin pipe it
-  reads closes."
-  [root]
-  (let [marker (str "lsp-bridge start " root)]
-    (->> (java.lang.ProcessHandle/allProcesses)
-         .toList
-         (filter #(some-> (.info ^java.lang.ProcessHandle %)
-                          .commandLine (.orElse nil)
-                          (str/includes? marker)))
-         vec)))
-
-(defn- exited?
-  "Whether handle finished within timeout-ms."
-  [^java.lang.ProcessHandle handle timeout-ms]
-  (try
-    (.get (.onExit handle) timeout-ms java.util.concurrent.TimeUnit/MILLISECONDS)
-    true
-    (catch java.util.concurrent.TimeoutException _ false)
-    (catch Exception _ (not (.isAlive handle)))))
-
-(defn- terminate!
-  "Ask a process and its children to exit, then force whatever is left.
-
-  SIGTERM first so the bridge's shutdown hook gets to stop clojure-lsp; killing
-  the parent outright would leave the language server running with its index
-  still in memory. The children are collected before signalling, because a dead
-  parent no longer reports them."
-  [^java.lang.ProcessHandle handle]
-  (let [children (vec (.toList (.descendants handle)))]
-    (.destroy handle)
-    (when-not (exited? handle 2000)
-      (.destroyForcibly handle))
-    (doseq [^java.lang.ProcessHandle child children
-            :when (.isAlive child)]
-      (.destroy child)
-      (when-not (exited? child 1000)
-        (.destroyForcibly child)))))
-
 (defn stop
   "Stop the bridge for root.
 
@@ -340,11 +346,24 @@
                        (str/join ", " (map #(str "pid " (.pid ^java.lang.ProcessHandle %)) processes))
                        "none running")))
     (println (format ";; log:      %s" (log-file root)))
-    (if-not (running? root)
-      (do (println (format ";; no bridge running for %s%s" root
-                           (if (or pid port) " — `clj-skill lsp stop` clears the stale files" "")))
-          0)
+    (cond
+      (running? root)
       (let [resp (send-command root {:command "status"})]
         (println (format ";; bridge %s for %s, %s file(s) with diagnostics"
                          (:status resp) root (:diagnostics-count resp 0)))
-        (if (= "running" (:status resp)) 0 1)))))
+        (if (= "running" (:status resp)) 0 1))
+
+      ;; A bridge with no port file cannot be reached, and the next query would
+      ;; start a second one beside it.
+      (seq processes)
+      (do (println (format ";; orphaned bridge for %s — unreachable; `clj-skill lsp stop` reclaims it"
+                           root))
+          1)
+
+      (or pid port)
+      (do (println (format ";; no bridge running for %s — `clj-skill lsp stop` clears the stale files"
+                           root))
+          1)
+
+      :else
+      (do (println (format ";; no bridge running for %s" root)) 0))))
