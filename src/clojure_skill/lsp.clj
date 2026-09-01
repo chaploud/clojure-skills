@@ -67,12 +67,16 @@
 (defn read-port [root] (read-number (port-file root)))
 (defn read-pid [root] (read-number (pid-file root)))
 
-(defn running?
-  "Whether a bridge is usable for root.
+(defn reachable?
+  "Whether root has a bridge this process can actually talk to.
 
-  Both the recorded pid and the port file must be there: after a reboot the pid
-  can be reused by an unrelated process, and treating that as a live bridge makes
-  every query fail at connect time instead of restarting the bridge."
+  Both the port file and a live recorded pid are required: without the port there
+  is no way to reach the process, and a pid alone can belong to something else
+  entirely after a reboot.
+
+  Deliberately not the same question as \"is a bridge running\" — a bridge whose
+  files were deleted is running and unreachable, and answering the two with one
+  predicate is what once let a query start a second bridge beside an orphan."
   [root]
   (boolean
    (when (fs/exists? (port-file root))
@@ -156,7 +160,7 @@
                      {:dir root :out log :err log}))
   (loop [waited 0]
     (cond
-      (and (fs/exists? (port-file root)) (running? root))
+      (and (fs/exists? (port-file root)) (reachable? root))
       (do (println (format ";; bridge listening on port %s after %ds"
                            (read-port root) (quot waited 1000)))
           0)
@@ -178,7 +182,7 @@
   "Start the bridge if it is not up, and abort when it cannot be started, so a
   query is never run against a bridge that failed to come up."
   [root]
-  (when-not (running? root)
+  (when-not (reachable? root)
     (when-not (zero? (start! root))
       (throw (ex-info (str "could not start the clojure-lsp bridge for " root) {:root root})))))
 
@@ -295,7 +299,7 @@
 ;; ============================================================================
 
 (defn start [root]
-  (if (running? root)
+  (if (reachable? root)
     (do (println (format ";; bridge already running for %s (pid %s, port %s)"
                          root (read-pid root) (read-port root)))
         0)
@@ -347,7 +351,7 @@
                        "none running")))
     (println (format ";; log:      %s" (log-file root)))
     (cond
-      (running? root)
+      (reachable? root)
       (let [resp (send-command root {:command "status"})]
         (println (format ";; bridge %s for %s, %s file(s) with diagnostics"
                          (:status resp) root (:diagnostics-count resp 0)))
