@@ -323,11 +323,28 @@
        :else (format ";; no bridge running for %s" root)))
     0))
 
-(defn status [root]
-  (if-not (running? root)
-    (do (println (format ";; no bridge running for %s" root)) 0)
-    (let [resp (send-command root {:command "status"})]
-      (println (format ";; bridge %s for %s (pid %s, port %s), %s file(s) with diagnostics"
-                       (:status resp) root (read-pid root) (read-port root)
-                       (:diagnostics-count resp 0)))
-      (if (= "running" (:status resp)) 0 1))))
+(defn status
+  "Report everything about the bridge for root: whether it answers, which files
+  record it, and whether a process is actually alive.
+
+  All of it, so that checking the state never means listing .lsp/ by hand — the
+  pid and port files are dot-prefixed and an `ls` without -a hides them, which
+  reads as \"the files are gone\"."
+  [root]
+  (let [pid (read-pid root)
+        port (read-port root)
+        processes (bridge-processes root)]
+    (println (format ";; recorded: pid %s, port %s" (or pid "none") (or port "none")))
+    (println (format ";; process:  %s"
+                     (if (seq processes)
+                       (str/join ", " (map #(str "pid " (.pid ^java.lang.ProcessHandle %)) processes))
+                       "none running")))
+    (println (format ";; log:      %s" (log-file root)))
+    (if-not (running? root)
+      (do (println (format ";; no bridge running for %s%s" root
+                           (if (or pid port) " — `clj-skill lsp stop` clears the stale files" "")))
+          0)
+      (let [resp (send-command root {:command "status"})]
+        (println (format ";; bridge %s for %s, %s file(s) with diagnostics"
+                         (:status resp) root (:diagnostics-count resp 0)))
+        (if (= "running" (:status resp)) 0 1)))))
