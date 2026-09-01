@@ -268,7 +268,7 @@
         shown (vec (take limit hits))]
     (run! println shown)
     (when (seq (drop limit hits))
-      (println (format ";; %d shown, more matches exist — raise --limit to see them"
+      (println (format ";; %d shown; the search stopped here, so later files were not read — raise --limit"
                        (count shown))))
     (when (empty? shown)
       (println (format ";; no match for %s in %d file(s)%s"

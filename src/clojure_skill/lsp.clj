@@ -250,20 +250,75 @@
         0)
     (start! root)))
 
-(defn stop [root]
-  (if-let [pid (read-pid root)]
-    (do
-      (send-command root {:command "stop"})
-      (Thread/sleep 500)
-      (when (running? root)
-        (try
-          (some-> (java.lang.ProcessHandle/of pid) (.orElse nil) .destroyForcibly)
-          (catch Exception _ nil)))
-      (fs/delete-if-exists (pid-file root))
-      (fs/delete-if-exists (port-file root))
-      (println (format ";; bridge stopped for %s (log: %s)" root (log-file root))))
-    (println (format ";; no bridge running for %s" root)))
-  0)
+(defn- bridge-processes
+  "Live bridge processes started for root, found by their command line.
+
+  The pid file can be gone while the process lives — a bridge killed with
+  SIGKILL never runs the shutdown hook that removes it — and such an orphan
+  keeps clojure-lsp and its several hundred MB alive."
+  [root]
+  (let [marker (str "lsp-bridge start " root)]
+    (->> (java.lang.ProcessHandle/allProcesses)
+         .toList
+         (filter #(some-> (.info ^java.lang.ProcessHandle %)
+                          .commandLine (.orElse nil)
+                          (str/includes? marker)))
+         vec)))
+
+(defn- exited?
+  "Whether handle finished within timeout-ms."
+  [^java.lang.ProcessHandle handle timeout-ms]
+  (try
+    (.get (.onExit handle) timeout-ms java.util.concurrent.TimeUnit/MILLISECONDS)
+    true
+    (catch java.util.concurrent.TimeoutException _ false)
+    (catch Exception _ (not (.isAlive handle)))))
+
+(defn- terminate!
+  "Ask a process and its children to exit, then force whatever is left.
+
+  SIGTERM first so the bridge's shutdown hook gets to stop clojure-lsp; killing
+  the parent outright would leave the language server running with its index
+  still in memory. The children are collected before signalling, because a dead
+  parent no longer reports them."
+  [^java.lang.ProcessHandle handle]
+  (let [children (vec (.toList (.descendants handle)))]
+    (.destroy handle)
+    (when-not (exited? handle 2000)
+      (.destroyForcibly handle))
+    (doseq [^java.lang.ProcessHandle child children
+            :when (.isAlive child)]
+      (.destroy child)
+      (when-not (exited? child 1000)
+        (.destroyForcibly child)))))
+
+(defn stop
+  "Stop the bridge for root.
+
+  Reports which of the three states it found, because \"I stopped it\" and
+  \"nothing was there\" call for different next steps when a query has just
+  failed."
+  [root]
+  (let [recorded (read-pid root)
+        running (bridge-processes root)]
+    (when (and recorded (seq running))
+      ;; Ask it to shut down cleanly first; fall back to signals below.
+      (try (send-command root {:command "stop"}) (catch Exception _ nil))
+      (Thread/sleep 300))
+    (doseq [handle (bridge-processes root)]
+      (try
+        (terminate! handle)
+        (catch Exception e
+          (binding [*out* *err*]
+            (println (format "could not stop pid %s: %s" (.pid handle) (ex-message e)))))))
+    (fs/delete-if-exists (pid-file root))
+    (fs/delete-if-exists (port-file root))
+    (println
+     (cond
+       (seq running) (format ";; bridge stopped for %s (log: %s)" root (log-file root))
+       recorded (format ";; no bridge was running for %s; removed its stale pid and port files" root)
+       :else (format ";; no bridge running for %s" root)))
+    0))
 
 (defn status [root]
   (if-not (running? root)
