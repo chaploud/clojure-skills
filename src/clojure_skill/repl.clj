@@ -145,13 +145,19 @@
                false (str ";; shadow-cljs repl is NOT in CLJS mode\n"
                           ";; (shadow/active-builds) lists builds; (shadow/repl <build-id>) jacks in")
                ";; could not determine whether the shadow-cljs repl is in CLJS mode")))
-  (doseq [msg messages]
-    (when-let [s (:out msg)] (print s) (flush))
-    (when-let [s (:err msg)] (binding [*out* *err*] (print s) (flush)))
-    (when-let [value (:value msg)]
-      (println (str "=> " value))
-      (println (format "*======== %s | %s ========*" (:ns msg) (name env-type)))
-      (flush))))
+  ;; Track whether the server's last output ended a line: shadow-cljs prints its
+  ;; prompt without a trailing newline, which would otherwise run into `=>`.
+  (let [line-open? (volatile! false)]
+    (doseq [msg messages]
+      (doseq [[stream text] [[*out* (:out msg)] [*err* (:err msg)]]
+              :when text]
+        (binding [*out* stream] (print text) (flush))
+        (vreset! line-open? (not (str/ends-with? text "\n"))))
+      (when-let [value (:value msg)]
+        (when @line-open? (println) (vreset! line-open? false))
+        (println (str "=> " value))
+        (println (format "*======== %s | %s ========*" (:ns msg) (name env-type)))
+        (flush)))))
 
 (defn eval-code
   "Evaluate code on host:port, repairing unbalanced delimiters first.

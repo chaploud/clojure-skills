@@ -45,6 +45,7 @@
 
 (defn pid-file [root] (str (fs/path root ".lsp" ".clj-lsp-bridge.pid")))
 (defn port-file [root] (str (fs/path root ".lsp" ".clj-lsp-bridge.port")))
+(defn log-file [root] (str (fs/path root ".lsp" "clj-lsp-bridge.log")))
 
 (defn- read-number [path]
   (try
@@ -72,27 +73,44 @@
 (def ^:private start-timeout-ms 180000)
 (def ^:private start-poll-ms 500)
 
+(def ^:private progress-every-ms 15000)
+
 (defn start!
   "Start the bridge for root in the background and wait until it is listening.
 
-  A cold clojure-lsp indexing a monorepo can take minutes, so the wait is long;
-  `clj-skill lsp-bridge warm ROOT` populates the cache ahead of time."
+  Indexing a cold monorepo can take minutes, so progress is reported while
+  waiting — silence here is indistinguishable from a hang."
   [root]
-  (println (format ";; starting clj-lsp-bridge for %s …" root))
-  (process/process ["clj-skill" "lsp-bridge" "start" root]
-                   {:dir root :out :inherit :err :inherit})
+  (println (format ";; clojure-lsp is indexing %s — the first query waits for this." root))
+  (println ";; run `clj-skill lsp-bridge warm ROOT` ahead of time to avoid the wait.")
+  (flush)
+  ;; The bridge outlives this process, so it must not inherit our stdout: holding
+  ;; the write end of the pipe open keeps a `… | head` from ever seeing EOF, and
+  ;; the caller hangs long after the query itself finished. Its output goes to a
+  ;; log beside the pid and port files instead.
+  (fs/create-dirs (fs/path root ".lsp"))
+  (let [log (fs/file (log-file root))]
+    (process/process ["clj-skill" "lsp-bridge" "start" root]
+                     {:dir root :out log :err log}))
   (loop [waited 0]
     (cond
       (and (fs/exists? (port-file root)) (running? root))
-      (do (println (format ";; bridge listening on port %s" (read-port root))) 0)
+      (do (println (format ";; bridge listening on port %s after %ds"
+                           (read-port root) (quot waited 1000)))
+          0)
 
       (>= waited start-timeout-ms)
       (do (binding [*out* *err*]
-            (println (format "bridge did not start within %ds" (quot start-timeout-ms 1000))))
+            (println (format "clojure-lsp did not finish indexing within %ds — see %s"
+                             (quot start-timeout-ms 1000) (log-file root))))
           1)
 
       :else
-      (do (Thread/sleep start-poll-ms) (recur (+ waited start-poll-ms))))))
+      (do (when (and (pos? waited) (zero? (mod waited progress-every-ms)))
+            (println (format ";; still indexing (%ds)…" (quot waited 1000)))
+            (flush))
+          (Thread/sleep start-poll-ms)
+          (recur (+ waited start-poll-ms))))))
 
 (defn- ensure!
   "Start the bridge if it is not up, and abort when it cannot be started, so a
@@ -232,7 +250,7 @@
           (catch Exception _ nil)))
       (fs/delete-if-exists (pid-file root))
       (fs/delete-if-exists (port-file root))
-      (println (format ";; bridge stopped for %s" root)))
+      (println (format ";; bridge stopped for %s (log: %s)" root (log-file root))))
     (println (format ";; no bridge running for %s" root)))
   0)
 

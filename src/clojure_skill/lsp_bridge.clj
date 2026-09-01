@@ -14,7 +14,7 @@
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str])
-  (:import [java.io BufferedReader InputStreamReader OutputStream]
+  (:import [java.io OutputStream]
            [java.net ServerSocket Socket InetAddress]
            [java.nio.charset StandardCharsets]))
 
@@ -32,35 +32,61 @@
     (.write out bytes)
     (.flush out)))
 
+(defn- read-header-line
+  "Read one CRLF-terminated header line as a string, or ::eof at end of stream."
+  [^java.io.InputStream in]
+  (let [buf (java.io.ByteArrayOutputStream.)]
+    (loop [prev -1]
+      (let [b (.read in)]
+        (cond
+          (neg? b) (if (zero? (.size buf)) ::eof (.toString buf "US-ASCII"))
+          (and (= 10 b) (= 13 prev)) (let [s (.toString buf "US-ASCII")]
+                                       (subs s 0 (max 0 (dec (count s)))))
+          :else (do (.write buf b) (recur b)))))))
+
+(defn- read-body
+  "Read exactly n bytes and decode them as UTF-8.
+
+  Content-Length counts bytes, not characters. Reading through a Reader instead
+  would consume the wrong amount for any message containing non-ASCII text — one
+  such message desynchronises the framing and the bridge never answers again."
+  [^java.io.InputStream in n]
+  (let [buf (byte-array n)]
+    (loop [off 0]
+      (if (< off n)
+        (let [read (.read in buf off (- n off))]
+          (when (neg? read)
+            (throw (ex-info "truncated LSP message body" {:expected n :got off})))
+          (recur (+ off read)))
+        (String. buf StandardCharsets/UTF_8)))))
+
 (defn read-lsp-message
-  "Read one JSON-RPC message from reader.
+  "Read one JSON-RPC message from the LSP process's stdout.
 
   Returns the parsed message, ::eof when clojure-lsp closed the stream, or
   ::malformed when a message could not be read. The two failures are kept apart
   because ::eof means the server is gone for good while ::malformed is one bad
-  message the reader can skip — collapsing them into nil made a parse error look
-  like a dead server, and vice versa."
-  [^BufferedReader reader]
+  message the reader can skip."
+  [^java.io.InputStream in]
   (try
     (loop [content-length nil]
-      (let [line (.readLine reader)]
+      (let [line (read-header-line in)]
         (cond
-          (nil? line) ::eof
+          (= ::eof line) ::eof
 
           (str/blank? line)
           (if content-length
-            (let [buf (char-array content-length)]
-              (loop [offset 0]
-                (when (< offset content-length)
-                  (let [n (.read reader buf offset (- content-length offset))]
-                    (if (pos? n)
-                      (recur (+ offset n))
-                      (throw (ex-info "truncated LSP message body" {}))))))
-              (json/parse-string (String. buf) true))
+            (let [body (read-body in content-length)]
+              ;; Parsed in its own try: Jackson's parse error is an IOException,
+              ;; so letting it reach the outer handler would report one bad
+              ;; message as a dead server and stop the reader loop for good.
+              (try
+                (json/parse-string body true)
+                (catch Exception _ ::malformed)))
             (recur nil))
 
           :else
-          (let [[_ len-str] (re-matches #"Content-Length:\s*(\d+)" line)]
+          (let [[_ len-str] (re-matches #"(?i)Content-Length:\s*(\d+)" line)]
             (recur (if len-str (parse-long len-str) content-length))))))
     (catch java.io.IOException _ ::eof)
     (catch Exception _ ::malformed)))
@@ -154,7 +180,7 @@
 (defn initialize-lsp
   "Send initialize and initialized to clojure-lsp.
   Returns the initialize response."
-  [lsp-out lsp-reader project-root]
+  [lsp-out lsp-in project-root]
   (let [init-req (make-lsp-request
                   "initialize"
                   {:processId (.pid (java.lang.ProcessHandle/current))
@@ -169,9 +195,10 @@
     (write-lsp-message lsp-out init-req)
     ;; Read messages until we get the initialize response
     (loop []
-      (let [msg (read-lsp-message lsp-reader)]
+      (let [msg (read-lsp-message lsp-in)]
         (cond
-          (nil? msg) (throw (ex-info "LSP process terminated during initialize" {}))
+          (= ::eof msg) (throw (ex-info "clojure-lsp exited during initialize" {}))
+          (= ::malformed msg) (recur)
 
           ;; Got our response
           (= (:id msg) id)
@@ -198,11 +225,11 @@
   - Responses (with :id) -> deliver to pending-requests promise
   - Diagnostics notifications -> cache
   - Other notifications -> ignore"
-  [lsp-reader]
+  [lsp-in]
   (future
     (try
       (loop []
-        (let [msg (read-lsp-message lsp-reader)]
+        (let [msg (read-lsp-message lsp-in)]
           (cond
             (= ::eof msg) (reset! lsp-alive? false)
 
@@ -246,7 +273,8 @@
       (swap! pending-requests dissoc id)
       (cond
         (= result ::timeout)
-        (throw (ex-info (format "clojure-lsp did not answer %s within %dms" method timeout-ms)
+        (throw (ex-info (format "clojure-lsp did not answer %s within %dms — restart it with `clj-skill lsp stop` and retry"
+                                method timeout-ms)
                         {:method method}))
 
         (:error result)
@@ -441,10 +469,10 @@
   (let [project-root (or project-root (System/getProperty "user.dir"))
         lsp-process (start-lsp-process project-root)
         lsp-out (.getOutputStream lsp-process)
-        lsp-reader (BufferedReader. (InputStreamReader. (.getInputStream lsp-process) StandardCharsets/UTF_8))]
+        lsp-in (.getInputStream lsp-process)]
     (println (str "Warming clojure-lsp cache for " project-root " ..."))
     ;; initialize only answers once analysis, and the cache write, are done
-    (initialize-lsp lsp-out lsp-reader project-root)
+    (initialize-lsp lsp-out lsp-in project-root)
     ;; shutdown/exit before killing the process, so the cache is flushed
     (try
       (write-lsp-message lsp-out (make-lsp-request "shutdown" nil))
@@ -471,15 +499,15 @@
         ;; Start clojure-lsp subprocess
         lsp-process (start-lsp-process project-root)
         lsp-out (.getOutputStream lsp-process)
-        lsp-reader (BufferedReader. (InputStreamReader. (.getInputStream lsp-process) StandardCharsets/UTF_8))
+        lsp-in (.getInputStream lsp-process)
 
         ;; Initialize LSP protocol
         _ (println "Initializing clojure-lsp...")
-        _init-resp (initialize-lsp lsp-out lsp-reader project-root)
+        _init-resp (initialize-lsp lsp-out lsp-in project-root)
         _ (println "clojure-lsp initialized.")
 
         ;; Start background reader loop
-        _reader-future (start-lsp-reader-loop lsp-reader)
+        _reader-future (start-lsp-reader-loop lsp-in)
 
         ;; Start TCP server
         [^ServerSocket server-socket tcp-port] (start-tcp-server)

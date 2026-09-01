@@ -185,6 +185,15 @@
 ;; Tests
 ;; ============================================================================
 
+(defn- context-label
+  "The `testing` context of an assertion, as one line.
+
+  cider-nrepl sends nested contexts already joined into a single string, so
+  joining it as a collection would split it character by character."
+  [context]
+  (let [text (if (string? context) context (str/join " / " context))]
+    (some-> (not-empty (str/trim (str/replace text #"\s+" " "))) (->> (str " ")))))
+
 (defn- print-test-failures
   "Print one line per failing assertion, then the expected/actual pair."
   [results]
@@ -195,7 +204,7 @@
     (println (format "%s:%s: %s %s/%s%s"
                      (or file "?") (or line "?") (str/upper-case type)
                      (name test-ns) (name var-name)
-                     (if (seq context) (str " " (str/join " / " context)) "")))
+                     (or (context-label context) "")))
     (when (seq message) (println (str "  " (str/trim message))))
     (when expected (println (str "  expected: " (str/trim expected))))
     (when actual (println (str "  actual:   " (str/trim actual))))))

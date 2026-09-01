@@ -95,8 +95,19 @@ Everything else matches exactly as written:
 Prints `path:line:col: <first line of the match>`. Defaults to 50 matches;
 raise it with `--limit`.
 
-Use `rg` when you are looking for a name or a string — it is faster and you
-already know it. Use `find` when the *structure* is the question.
+Use `rg` when you are looking for a name or a string. Use `find` when the
+*shape* is the question and no substring identifies it:
+
+```bash
+clj-skill find '(defn _ [_ _] &)' src        # every two-argument defn
+clj-skill find '(defn _ _ {:status _} &)' src # a handler taking a status map
+clj-skill find '(assoc _ :id &)' src          # calls that set :id
+clj-skill find '(defmethod _ [::a ::b] &)' src # one multimethod dispatch value
+clj-skill find '{:status status}' src         # an argument destructured this way
+```
+
+That last one is the case `rg` cannot narrow: `:status` appears everywhere, but
+`{:status status}` as a *form* appears only where it is destructured.
 
 ### replace — edit a whole form
 
@@ -142,6 +153,16 @@ EOF
 - State persists between calls, per host:port. Use `:reload` when requiring a
   namespace you just edited
 - `clj-skill repl reset -p PORT` starts a fresh session
+
+A form that switches the REPL's evaluation environment — `(shadow/repl :build)`,
+`:cljs/quit` — takes effect for the **next** call, not for the rest of the
+heredoc it appears in. nREPL evaluates the whole heredoc as one request, and the
+switch applies to the request after it. Send the switch on its own:
+
+```bash
+clj-skill repl eval -p 7888 '(shadow/repl :app)'
+clj-skill repl eval -p 7888 '(js/parseInt "42")'
+```
 
 ## Runtime queries (cider-nrepl)
 

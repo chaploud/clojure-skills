@@ -4,5 +4,6 @@ target/
 .clj-kondo/
 .lsp/.cache/
 .lsp/.clj-lsp-bridge.*
+.lsp/clj-lsp-bridge.log
 *.log
 .clojure-skill/
