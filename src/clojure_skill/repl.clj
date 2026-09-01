@@ -4,6 +4,7 @@
   Sessions persist per host:port, so vars and requires survive across
   invocations, and every subcommand shares the same session."
   (:require [babashka.fs :as fs]
+            [babashka.process :as process]
             [clojure.string :as str]
             [clojure-skill.delimiter-repair :refer [fix-delimiters]]
             [clojure-skill.nrepl-client :as nc]
@@ -52,30 +53,41 @@
     (catch Exception _ nil)))
 
 (defn parse-lsof-ports
-  "Listening TCP ports in lsof output, e.g. `TCP *:7888 (LISTEN)`."
+  "Listening TCP ports in lsof output.
+
+  Covers the three address forms lsof prints — `*:7888`, `127.0.0.1:7888` and the
+  bracketed IPv6 `[::1]:7888` — because a server bound only to ::1 would
+  otherwise be invisible to discovery."
   [lsof-output]
   (when lsof-output
     (->> (str/split-lines lsof-output)
          (keep (fn [line]
-                 (when-let [[_ port] (re-find #"TCP\s+(?:\*|[\d.]+):(\d+)\s+\(LISTEN\)" line)]
+                 (when-let [[_ port] (re-find #"TCP\s+(?:\*|\[[0-9a-fA-F:]*\]|[\d.]+):(\d+)\s+\(LISTEN\)" line)]
                    (parse-long port))))
          distinct
          vec)))
 
-(defn- listening-jvm-ports []
+(defn- listening-jvm-ports
+  "Ports that a JVM or Babashka process is listening on, via lsof.
+
+  Returns nil when lsof could not be run at all, which the caller reports
+  separately: a missing lsof and an idle machine lead to different next steps."
+  []
   (try
-    (let [proc (.. (ProcessBuilder. ["sh" "-c" "lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -Ei 'java|clojure|babashka|bb|nrepl'"])
-                   (redirectErrorStream true)
-                   start)
-          _ (.waitFor proc 5 java.util.concurrent.TimeUnit/SECONDS)]
-      (or (parse-lsof-ports (slurp (.getInputStream proc))) []))
-    (catch Exception _ [])))
+    (let [{:keys [out]} (process/sh ["sh" "-c" "lsof -nP -iTCP -sTCP:LISTEN | grep -Ei 'java|clojure|babashka|bb|nrepl'"])]
+      (or (parse-lsof-ports out) []))
+    (catch Exception _ nil)))
+
+(def ^:private probe-timeout-ms
+  "How long a candidate port gets to answer. Generous enough that a busy JVM
+  nREPL is not written off as unreachable."
+  1500)
 
 (defn- probe-port
   "Describe the nREPL server on port, or mark it invalid when it does not answer."
   [host port source current-dir]
   (try
-    (nc/with-socket host port 250
+    (nc/with-socket host port probe-timeout-ms
       (fn [socket out in]
         (let [conn (nc/make-connection socket out in host port)]
           (if (:sessions (nc/ls-sessions* conn))
@@ -100,33 +112,39 @@
   []
   (let [port-file-port (read-nrepl-port-file)
         current-dir (System/getProperty "user.dir")
+        lsof-ports (listening-jvm-ports)
         candidates (distinct (concat (when port-file-port [port-file-port])
-                                     (listening-jvm-ports)))]
-    (vec (pmap #(probe-port "localhost" %
-                            (if (= % port-file-port) :nrepl-port-file :lsof)
-                            current-dir)
-               candidates))))
+                                     lsof-ports))]
+    (with-meta
+      (vec (pmap #(probe-port "localhost" %
+                              (if (= % port-file-port) :nrepl-port-file :lsof)
+                              current-dir)
+                 candidates))
+      {:lsof-available (some? lsof-ports)})))
 
 ;; ============================================================================
 ;; Evaluation
 ;; ============================================================================
 
 (defn- cljs-mode?
-  "Whether a shadow-cljs session is currently jacked into a CLJS build."
+  "Whether a shadow-cljs session is jacked into a CLJS build, or nil when the
+  probe itself failed. Reporting a failed probe as not-in-CLJS-mode would send
+  the caller to switch a REPL that is already switched."
   [conn]
   (try
     (boolean (seq (:value (nc/eval-nrepl* conn "cljs.user/*clojurescript-version*"))))
-    (catch Exception _ false)))
+    (catch Exception _ nil)))
 
 (defn- print-messages
   "Print stdout, stderr and values from an eval, each value followed by a divider
   naming the namespace and environment it came from."
   [messages env-type shadow-cljs-mode?]
   (when (= env-type :shadow)
-    (println (if shadow-cljs-mode?
-               ";; shadow-cljs repl is in CLJS mode"
-               (str ";; shadow-cljs repl is NOT in CLJS mode\n"
-                    ";; (shadow/active-builds) lists builds; (shadow/repl <build-id>) jacks in"))))
+    (println (case shadow-cljs-mode?
+               true ";; shadow-cljs repl is in CLJS mode"
+               false (str ";; shadow-cljs repl is NOT in CLJS mode\n"
+                          ";; (shadow/active-builds) lists builds; (shadow/repl <build-id>) jacks in")
+               ";; could not determine whether the shadow-cljs repl is in CLJS mode")))
   (doseq [msg messages]
     (when-let [s (:out msg)] (print s) (flush))
     (when-let [s (:err msg)] (binding [*out* *err*] (print s) (flush)))
@@ -141,7 +159,13 @@
   On timeout an nREPL :interrupt is sent so a runaway evaluation does not keep
   the server busy after this process gives up."
   [{:keys [host port code timeout-ms] :or {timeout-ms 120000}}]
-  (let [code (or (fix-delimiters code) code)]
+  (let [repaired (fix-delimiters code)
+        sent (or repaired code)]
+    ;; Say so when the code sent differs from the code given: otherwise the
+    ;; caller reasons about the result of an expression it never wrote.
+    (when (not= (str/trim sent) (str/trim code))
+      (println ";; delimiters repaired before eval:")
+      (println sent))
     (try
       (nc/with-socket host (nc/coerce-long port) timeout-ms
         (fn [socket out in]
@@ -152,7 +176,7 @@
                 shadow-mode? (when (= env-type :shadow) (cljs-mode? conn))
                 eval-id (nc/next-id)]
             (try
-              (-> (nc/messages-for-id conn {"op" "eval" "code" code "id" eval-id})
+              (-> (nc/messages-for-id conn {"op" "eval" "code" sent "id" eval-id})
                   (print-messages env-type shadow-mode?))
               0
               (catch java.net.SocketTimeoutException _
@@ -202,7 +226,9 @@
   (let [discovered (discover)
         {valid true invalid false} (group-by (comp boolean :valid) discovered)]
     (if (empty? valid)
-      (println ";; no nREPL servers found")
+      (println (if (:lsof-available (meta discovered))
+                 ";; no nREPL servers found"
+                 ";; no nREPL servers found — lsof could not be run, so only .nrepl-port was checked"))
       (doseq [{:keys [host port env-type cider? project-dir matches-cwd]} valid]
         (println (format "%s:%s (%s%s)%s" host port
                          (name (or env-type :unknown))

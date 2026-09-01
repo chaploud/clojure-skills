@@ -17,6 +17,11 @@
                    (str "java 1 me 5u IPv6 0t0 TCP *:7888 (LISTEN)\n"
                         "java 1 me 6u IPv4 0t0 TCP *:7888 (LISTEN)\n"))))))
 
+(deftest a-bracketed-ipv6-address-is-a-listening-port
+  (testing "a server bound only to ::1 would otherwise be invisible to discovery"
+    (is (= [7888] (repl/parse-lsof-ports "java 1 me 5u IPv6 0t0 TCP [::1]:7888 (LISTEN)")))
+    (is (= [7888] (repl/parse-lsof-ports "java 1 me 5u IPv6 0t0 TCP [::]:7888 (LISTEN)")))))
+
 (deftest no-output-yields-no-ports
   (is (nil? (repl/parse-lsof-ports nil)))
   (is (empty? (repl/parse-lsof-ports ""))))

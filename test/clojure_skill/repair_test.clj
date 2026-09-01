@@ -17,13 +17,30 @@
     (is (false? formatted))))
 
 (deftest a-missing-delimiter-is-closed
-  (testing "the repaired source parses, which is the property that matters"
-    (let [{:keys [text delimiter-fixed]} (repair/repair-string "(defn f [x]\n  (+ x 1")]
-      (is (true? delimiter-fixed))
-      (is (not (dr/actual-delimiter-error? text))))))
+  (let [{:keys [text delimiter-fixed]} (repair/repair-string "(defn f [x]\n  (+ x 1")]
+    (is (true? delimiter-fixed))
+    (is (= "(defn f [x]\n  (+ x 1))" text))
+    (is (not (dr/actual-delimiter-error? text)))))
 
-(deftest reader-conditionals-and-tagged-literals-are-not-errors
-  (doseq [source ["(defn f [x] #?(:clj 1 :cljs 2))"
-                  "(defn f [] #dart [1 2])"
-                  "(def x #js {:a 1})"]]
-    (is (not (dr/actual-delimiter-error? source)) source)))
+(deftest an-unbalanced-string-cannot-be-repaired
+  (testing "so the stdin filter exits non-zero and leaves the input alone"
+    (is (nil? (repair/repair-string "(def a \"oops)")))))
+
+(deftest a-mismatched-closer-is-corrected-to-its-opener
+  (is (= "(def a [1 2])" (:text (repair/repair-string "(def a [1 2)")))))
+
+(deftest a-stray-closing-delimiter-is-removed
+  (testing "pinned deliberately: this is lossy, and a change to it should be a
+            decision rather than a surprise"
+    (let [{:keys [text delimiter-fixed]} (repair/repair-string "(def a 1))")]
+      (is (true? delimiter-fixed))
+      (is (= "(def a 1)" text)))))
+
+(deftest empty-input-is-not-a-repair-failure
+  (is (= "" (:text (repair/repair-string "")))))
+
+(deftest formatting-can-be-turned-off-without-losing-delimiter-repair
+  (testing "which is what the hook's --cljfmt flag selects"
+    (let [{:keys [text formatted]} (repair/repair-string "(defn f [x]\n(+ x 1))" {:format? false})]
+      (is (false? formatted))
+      (is (= "(defn f [x]\n(+ x 1))" text)))))

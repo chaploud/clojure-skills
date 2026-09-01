@@ -56,13 +56,18 @@
 (defn read-pid [root] (read-number (pid-file root)))
 
 (defn running?
-  "Whether the bridge process recorded for root is still alive."
+  "Whether a bridge is usable for root.
+
+  Both the recorded pid and the port file must be there: after a reboot the pid
+  can be reused by an unrelated process, and treating that as a live bridge makes
+  every query fail at connect time instead of restarting the bridge."
   [root]
   (boolean
-   (when-let [pid (read-pid root)]
-     (try
-       (some-> (java.lang.ProcessHandle/of pid) (.orElse nil) .isAlive)
-       (catch Exception _ false)))))
+   (when (fs/exists? (port-file root))
+     (when-let [pid (read-pid root)]
+       (try
+         (some-> (java.lang.ProcessHandle/of pid) (.orElse nil) .isAlive)
+         (catch Exception _ false))))))
 
 (def ^:private start-timeout-ms 180000)
 (def ^:private start-poll-ms 500)
@@ -89,30 +94,43 @@
       :else
       (do (Thread/sleep start-poll-ms) (recur (+ waited start-poll-ms))))))
 
-(defn- ensure! [root]
-  (when-not (running? root) (start! root)))
+(defn- ensure!
+  "Start the bridge if it is not up, and abort when it cannot be started, so a
+  query is never run against a bridge that failed to come up."
+  [root]
+  (when-not (running? root)
+    (when-not (zero? (start! root))
+      (throw (ex-info (str "could not start the clojure-lsp bridge for " root) {:root root})))))
 
 (defn send-command
-  "Send one JSON command to the bridge and return its parsed response."
+  "Send one JSON command to the bridge and return its parsed response.
+
+  Throws on every failure rather than returning nil. A query that never reached
+  clojure-lsp must not print the same thing as a query that ran and found
+  nothing — an agent reads \"no references\" as permission to delete the var."
   [root command-map]
-  (if-let [port (read-port root)]
-    (try
-      (with-open [sock (Socket. "127.0.0.1" (int port))
-                  out (io/writer (.getOutputStream sock))
-                  in (io/reader (.getInputStream sock))]
-        (.setSoTimeout sock 30000)
-        (.write out (json/generate-string command-map))
-        (.write out "\n")
-        (.flush out)
-        (some-> (.readLine in) (json/parse-string true)))
-      (catch java.net.ConnectException _
-        (binding [*out* *err*] (println "bridge is not accepting connections; it may have stopped."))
-        nil)
-      (catch Exception e
-        (binding [*out* *err*] (println (str "bridge error: " (ex-message e))))
-        nil))
-    (do (binding [*out* *err*] (println (format "no bridge port file for %s" root)))
-        nil)))
+  (let [port (or (read-port root)
+                 (throw (ex-info (format "no bridge is running for %s" root) {:root root})))
+        resp (try
+               (with-open [sock (Socket. "127.0.0.1" (int port))
+                           out (io/writer (.getOutputStream sock))
+                           in (io/reader (.getInputStream sock))]
+                 (.setSoTimeout sock 60000)
+                 (.write out (json/generate-string command-map))
+                 (.write out "\n")
+                 (.flush out)
+                 (some-> (.readLine in) (json/parse-string true)))
+               (catch java.net.ConnectException _
+                 (throw (ex-info (str "bridge is not accepting connections on port " port
+                                      "; stop it with `clj-skill lsp stop` and retry")
+                                 {:root root})))
+               (catch Exception e
+                 (throw (ex-info (str "bridge error: " (ex-message e)) {:root root}))))]
+    (when-not resp
+      (throw (ex-info "bridge closed the connection without answering" {:root root})))
+    (when-let [error (:error resp)]
+      (throw (ex-info (str error) {:root root})))
+    resp))
 
 ;; ============================================================================
 ;; Queries
@@ -120,30 +138,42 @@
 
 (def ^:private severities {1 "error" 2 "warning" 3 "info" 4 "hint"})
 
+(defn- uri-key->path
+  "Path for a file URI that arrived as a JSON key.
+
+  The URI is read back off the keyword rather than through `name`: keywordizing
+  \"file:///a/b.clj\" splits it into the namespace \"file:\" and the name
+  \"//a/b.clj\", so `name` alone yields a path with the leading directory gone."
+  [uri-key]
+  (-> (str uri-key)
+      (subs 1)
+      (str/replace-first #"^file:/*" "/")))
+
 (defn- print-diagnostic [path {:keys [range severity message]}]
   (let [{:keys [line character]} (:start range)]
     (println (format "%s:%d:%d: %s: %s"
                      path (inc line) (inc character)
                      (get severities severity "unknown") message))))
 
-(defn diagnostics [root {:keys [file]}]
+(defn diagnostics
+  "Print clojure-lsp's diagnostics for one file, or for every file it has
+  analysed.
+
+  Exits non-zero when anything was reported, so a caller can branch on it."
+  [root {:keys [file]}]
   (ensure! root)
-  (when-let [resp (send-command root (cond-> {:command "diagnostics"}
-                                       file (assoc :file (str (fs/absolutize file)))))]
-    (let [diags (:diagnostics resp)]
-      (if file
-        (if (seq diags)
-          (run! #(print-diagnostic file %) diags)
-          (println (format ";; no diagnostics for %s" file)))
-        (let [any? (atom false)]
-          (doseq [[uri file-diags] diags
-                  :when (seq file-diags)
-                  :let [path (str/replace-first (name uri) #"^file://" "")]
-                  d file-diags]
-            (reset! any? true)
-            (print-diagnostic path d))
-          (when-not @any? (println ";; no diagnostics"))))))
-  0)
+  (let [resp (send-command root (cond-> {:command "diagnostics"}
+                                  file (assoc :file (str (fs/absolutize file)))))
+        by-file (if file
+                  {file (:diagnostics resp)}
+                  (update-keys (:diagnostics resp) uri-key->path))
+        reported (for [[path diags] by-file
+                       d diags]
+                   (do (print-diagnostic path d) d))]
+    (if (seq reported)
+      1
+      (do (println (if file (format ";; no diagnostics for %s" file) ";; no diagnostics"))
+          0))))
 
 (defn- print-locations [locations empty-msg]
   (if (seq locations)
@@ -207,10 +237,10 @@
   0)
 
 (defn status [root]
-  (if (running? root)
+  (if-not (running? root)
+    (do (println (format ";; no bridge running for %s" root)) 0)
     (let [resp (send-command root {:command "status"})]
-      (println (format ";; bridge running for %s (pid %s, port %s), %s file(s) with diagnostics"
-                       root (read-pid root) (read-port root)
-                       (:diagnostics-count resp 0))))
-    (println (format ";; no bridge running for %s" root)))
-  0)
+      (println (format ";; bridge %s for %s (pid %s, port %s), %s file(s) with diagnostics"
+                       (:status resp) root (read-pid root) (read-port root)
+                       (:diagnostics-count resp 0)))
+      (if (= "running" (:status resp)) 0 1))))

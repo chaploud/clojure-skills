@@ -12,8 +12,20 @@
   -tools {:doc "Tool name -> main-opts, read from :bbin/bin so it is declared once"
           :task (:bbin/bin (edn/read-string (slurp "bb.edn")))}
 
-  install {:doc "Install all CLI tools (paren-repair hooks are opt-in; use `bb install-hooks`)"
-           :depends [-tools]
+  ;; A quote in a map value would be read as an extra element here: bb reads
+  ;; bb.edn as EDN, where ' is not a reader macro.
+  -legacy-tools {:doc "Binaries from before the single-binary rewrite"
+                 :task ["clj-paren-repair-claude-hook" "clj-nrepl-eval" "clj-paren-repair"
+                        "clj-lsp-bridge" "clj-lsp-client"]}
+
+  -remove-legacy {:doc "Uninstall any pre-rewrite binaries still on PATH"
+                  :depends [-legacy-tools]
+                  :task (doseq [tool-name -legacy-tools]
+                          (shell {:continue true :out :string :err :string}
+                                 "bbin" "uninstall" tool-name))}
+
+  install {:doc "Install the CLI (paren-repair hooks are opt-in; use `bb install-hooks`)"
+           :depends [-tools -remove-legacy]
            :task (do
                    (doseq [[tool-name {:keys [main-opts]}] -tools]
                      (println (str "Installing " tool-name "..."))
@@ -22,19 +34,15 @@
                    (println)
                    (shell "bb" "doctor"))}
 
-  uninstall {:doc "Uninstall all CLI tools and remove hooks"
-             :depends [-tools]
+  uninstall {:doc "Uninstall the CLI and remove hooks"
+             :depends [-tools -remove-legacy]
              :task (do
                      (require 'clojure-skill.claude-settings)
                      ((resolve 'clojure-skill.claude-settings/uninstall-hooks!))
-                     ;; the pre-1.0 per-tool binaries are removed too, so an
-                     ;; upgrade does not leave five broken wrappers on PATH
-                     (doseq [tool-name (concat (keys -tools)
-                                               '[clj-paren-repair-claude-hook clj-nrepl-eval
-                                                 clj-paren-repair clj-lsp-bridge clj-lsp-client])]
+                     (doseq [tool-name (keys -tools)]
                        (println (str "Uninstalling " tool-name "..."))
-                       (shell {:continue true :out nil :err nil} "bbin" "uninstall" (str tool-name)))
-                     (println "\nAll tools uninstalled."))}
+                       (shell {:continue true} "bbin" "uninstall" (str tool-name)))
+                     (println "\nUninstalled."))}
 
   install-hooks {:doc "Register paren-repair hooks in ~/.claude/settings.json (opt-in)"
                  :task (do

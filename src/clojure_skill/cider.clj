@@ -1,10 +1,7 @@
 (ns clojure-skill.cider
-  "Queries that need the cider-nrepl middleware: symbol lookup, runtime
-  cross-references, test runs, exception analysis and value inspection.
+  "Queries that need the cider-nrepl middleware.
 
-  These answer questions a static index cannot — what is actually loaded, what a
-  test actually asserted, where an exception actually came from — and they all
-  reuse the session `repl eval` uses, so `stacktrace` reports the exception that
+  They share the session `repl eval` uses, so `stacktrace` reports the exception
   the last evaluation raised."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
@@ -21,7 +18,6 @@
 (def ^:private static-alternatives
   "Static equivalents to suggest when the runtime op is unavailable."
   {"info" "clj-skill lsp definition --file FILE --line N --col N"
-   "eldoc" "clj-skill lsp hover --file FILE --line N --col N"
    "fn-refs" "clj-skill lsp references --file FILE --line N --col N"
    "fn-deps" "clj-skill find '(SYM &)' src"
    "apropos" "clj-skill find '(defn NAME &)' src"})
@@ -45,14 +41,29 @@
             session (nc/ensure-session conn)]
         (f (assoc conn :session-id (:session-id session)) session)))))
 
+(def ^:private error-statuses
+  "nREPL statuses that mean the op did not do its job. Without checking these, an
+  errored op is indistinguishable from an op that ran and found nothing — and a
+  failing `cider test` would report a green run."
+  #{"error" "unknown-op" "eval-error" "namespace-not-found" "interrupted"})
+
 (defn- send-op!
   "Send op-map when the server supports its op, otherwise explain what is missing.
-  Returns the response map, or nil when the op is unavailable."
+
+  Returns the response map, or nil when the op is unavailable or the server
+  reported an error."
   [conn session op-map]
   (let [op (get op-map "op")]
-    (if (contains? (:ops session) op)
-      (nc/send-op conn op-map)
-      (report-missing-op op (:ops session)))))
+    (if-not (contains? (:ops session) op)
+      (report-missing-op op (:ops session))
+      (let [r (nc/send-op conn op-map)
+            failed (seq (filter error-statuses (:status r)))]
+        (if failed
+          (binding [*out* *err*]
+            (println (format "op %s failed: %s" op (str/join ", " failed)))
+            (when-let [detail (or (:err r) (:ex r))] (println (str/trim (str detail))))
+            nil)
+          r)))))
 
 ;; ============================================================================
 ;; Location formatting
@@ -114,7 +125,9 @@
                              (:ns r) (:name r) (or (one-line (:arglists-str r)) "")))
             (when (:doc r) (println (:doc r)))
             0)
-          (do (println (format ";; %s not found in namespace %s" sym (or ns "user"))) 1))
+          (do (println (format ";; %s not found — it may not be defined, or its namespace (%s) may not be loaded"
+                               sym (or ns "user")))
+              1))
         1))))
 
 (defn- xref [op opts sym {:keys [ns]} result-key empty-msg]
@@ -173,8 +186,7 @@
 ;; ============================================================================
 
 (defn- print-test-failures
-  "Print one line per failing assertion, then the expected/actual pair.
-  Passing tests are left to the summary — an agent only needs to read what broke."
+  "Print one line per failing assertion, then the expected/actual pair."
   [results]
   (doseq [[test-ns vars] results
           [var-name assertions] vars
@@ -188,9 +200,7 @@
     (when expected (println (str "  expected: " (str/trim expected))))
     (when actual (println (str "  actual:   " (str/trim actual))))))
 
-(defn- failed?
-  "Whether a run had failures or errors, so the exit code can carry the verdict."
-  [{:strs [fail error]}]
+(defn- failed? [{:strs [fail error]}]
   (pos? (+ (or fail 0) (or error 0))))
 
 (defn- print-test-summary [{:strs [test pass fail error] :as summary}]
@@ -199,9 +209,26 @@
     (println (format ";; %d assertion(s): %d pass, %d fail, %d error"
                      (or test 0) (or pass 0) (or fail 0) (or error 0)))))
 
+(defn- report-run
+  "Print a test run and turn it into an exit code.
+
+  A run that executed nothing is a failure when namespaces were named: the
+  namespace may be misspelled, or simply never required, and reporting that as a
+  green run is the one outcome an agent must not be given."
+  [r named-namespaces?]
+  (print-test-failures (:results r))
+  (print-test-summary (:summary r))
+  (cond
+    (failed? (:summary r)) 1
+    (and named-namespaces? (empty? (:summary r))) 1
+    :else 0))
+
 (defn run-tests
-  "Run tests in the given namespaces, or every loaded test namespace when none
-  are given, and report only what failed."
+  "Run tests in the given namespaces, or in every loaded project namespace when
+  none are given, and report only what failed.
+
+  cider-nrepl only sees namespaces the REPL has already required; one that was
+  never loaded is not found rather than run."
   [opts namespaces _flags]
   (with-session opts
     (fn [conn session]
@@ -209,9 +236,7 @@
                     {"ns-query" {"exactly" (vec namespaces)}}
                     {"ns-query" {"project?" "true"}})]
         (if-let [r (send-op! conn session {"op" "test-var-query" "var-query" query})]
-          (do (print-test-failures (:results r))
-              (print-test-summary (:summary r))
-              (if (failed? (:summary r)) 1 0))
+          (report-run r (boolean (seq namespaces)))
           1)))))
 
 (defn retest
@@ -220,9 +245,7 @@
   (with-session opts
     (fn [conn session]
       (if-let [r (send-op! conn session {"op" "retest"})]
-        (do (print-test-failures (:results r))
-            (print-test-summary (:summary r))
-            (if (failed? (:summary r)) 1 0))
+        (report-run r false)
         1))))
 
 ;; ============================================================================
@@ -291,4 +314,7 @@
             (do (println (render-inspect rendered))
                 (println ";; <N> marks an index for `inspect-push`")
                 0)
-            (do (println (str/trim (str (:err r) (:out r)))) 1)))))))
+            (do (binding [*out* *err*]
+                  (println (str/trim (or (not-empty (str (:err r) (:out r)))
+                                         "the expression produced no inspectable value"))))
+                1)))))))

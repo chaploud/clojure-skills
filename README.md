@@ -1,42 +1,13 @@
 # clojure-skills
 
-An [Agent Skill](https://agentskills.io) for Clojure development. Works with
-Claude Code, Codex CLI, Gemini CLI, and other agents that can run shell commands.
+An [Agent Skill](https://agentskills.io) that gives a coding agent Clojure-aware
+tools in place of the line-oriented ones it would otherwise reach for: structural
+search and editing instead of `sed`, a file outline instead of reading two
+thousand lines, failing assertions instead of a test log, and the three project
+frames of a stacktrace instead of sixty.
 
-Gives a coding agent Clojure-aware tools in place of the line-oriented ones it
-would otherwise reach for: structural search and editing instead of `sed`, a
-file outline instead of reading two thousand lines, failing assertions instead
-of a test log, and the three project frames of a stacktrace instead of sixty.
-
-Covers `.clj`, `.cljs`, `.cljc`, `.cljd`, `.edn`, `.bb` and `.lpy`.
-
-## What you get
-
-Everything is one binary, `clj-skill`. Each group states what it needs, and
-degrades to a named alternative when that is missing.
-
-| Group | Needs | Commands |
-|---|---|---|
-| Structure | babashka only | `outline` `find` `replace` `repair` |
-| REPL | a running nREPL | `repl ports` `repl eval` `repl reset` |
-| Runtime | cider-nrepl middleware | `cider info/refs/deps/test/retest/stacktrace/inspect/apropos/ns-vars` |
-| Static | clojure-lsp | `lsp diagnostics/references/definition/hover` |
-
-`clj-skill doctor` reports which of those work on the machine it runs on.
-
-Structural commands go through [rewrite-clj](https://github.com/clj-commons/rewrite-clj),
-which round-trips source byte for byte, so an edit cannot disturb the comments,
-blank lines or indentation around it.
-
-## Prerequisites
-
-| Tool | Required | Install |
-|---|---|---|
-| [Babashka](https://github.com/babashka/babashka#installation) | yes | `brew install borkdude/brew/babashka` |
-| [bbin](https://github.com/babashka/bbin) | yes | `bb install io.github.babashka/bbin` |
-| [ripgrep](https://github.com/BurntSushi/ripgrep) | no | `brew install ripgrep` — keeps `find` fast on large trees |
-| [clojure-lsp](https://clojure-lsp.io/installation/) | no | `brew install clojure-lsp/brew/clojure-lsp-native` — enables the `lsp` group |
-| [cider-nrepl](https://github.com/clojure-emacs/cider-nrepl) | no | a REPL dependency, see below — enables the `cider` group |
+Works with Claude Code, Codex CLI, Gemini CLI, and any agent that can run shell
+commands. Covers `.clj`, `.cljs`, `.cljc`, `.cljd`, `.edn`, `.bb` and `.lpy`.
 
 ## Install
 
@@ -46,11 +17,11 @@ cd ~/clojure-skills
 bb install
 ```
 
-`bb install` installs the `clj-skill` binary with bbin and then runs
-`clj-skill doctor`, which tells you what is missing and how to get it. Running
-it again is safe.
+That installs one binary, `clj-skill`, and then runs `clj-skill doctor`, which
+reports what works on your machine and how to enable the rest. Running it again
+is safe.
 
-Then register the skill with whichever agents you use:
+Then link the skill for whichever agents you use:
 
 ```bash
 mkdir -p ~/.claude/skills && ln -s ~/clojure-skills ~/.claude/skills/clojure-skills   # Claude Code
@@ -58,19 +29,62 @@ mkdir -p ~/.agents/skills && ln -s ~/clojure-skills ~/.agents/skills/clojure-ski
 mkdir -p ~/.gemini/skills && ln -s ~/clojure-skills ~/.gemini/skills/clojure-skills   # Gemini CLI
 ```
 
-### Optional: automatic paren repair (Claude Code)
+### Requirements
+
+| Tool | Required | Install |
+|---|---|---|
+| [Babashka](https://github.com/babashka/babashka#installation) | yes | `brew install borkdude/brew/babashka` |
+| [bbin](https://github.com/babashka/bbin) | yes | `bb install io.github.babashka/bbin` |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | no | `brew install ripgrep` — keeps `find` fast on large trees |
+| [clojure-lsp](https://clojure-lsp.io/installation/) | no | `brew install clojure-lsp/brew/clojure-lsp-native` — enables `clj-skill lsp` |
+| [cider-nrepl](https://github.com/clojure-emacs/cider-nrepl) | no | a REPL dependency, see below — enables `clj-skill cider` |
+
+Nothing optional is assumed: a command whose prerequisite is missing says so and
+names the alternative, rather than failing or quietly returning nothing.
+
+## Commands
+
+Run `clj-skill --help` for the full list, or read [SKILL.md](./SKILL.md) — that
+is what the agent reads.
+
+### Structure — needs nothing but Babashka
 
 ```bash
-bb install-hooks
+clj-skill outline src/my/ns.clj          # every top-level form as path:start-end
+clj-skill find '(defmethod &)' src       # search by shape: _ is any form, & is the rest
+clj-skill replace src/my/ns.clj '(defn my-fn &)' <<'EOF'
+(defn my-fn [x] (inc x))
+EOF
+clj-skill repair src/my/ns.clj           # balance delimiters and format
 ```
 
-Registers `PreToolUse`/`PostToolUse` hooks so unbalanced delimiters are repaired
-on every Write and Edit, and an Edit that cannot be repaired is rolled back
-rather than left broken. Off by default; `bb uninstall-hooks` removes it.
+`outline` turns a 2000-line file into 40 lines the agent can read a range out of.
+`replace` swaps one whole top-level form and leaves every other byte alone; it
+refuses to write unless the pattern matches exactly one form.
 
-### Optional: cider-nrepl
+### REPL — needs a running nREPL server
 
-Add the middleware to the alias you start your REPL with:
+```bash
+clj-skill repl ports                     # servers here, and which have cider-nrepl
+clj-skill repl eval -p 7888 <<'EOF'
+(+ 1 2 3)
+EOF
+```
+
+State persists between calls. `--port` can be left out when exactly one
+discovered server's directory is the working directory.
+
+### Runtime queries — needs the cider-nrepl middleware
+
+```bash
+clj-skill cider info my-fn --ns my.ns    # where it is defined, arglists, doc
+clj-skill cider refs my-fn --ns my.ns    # who calls it
+clj-skill cider test my.ns-test          # only what failed, with expected/actual
+clj-skill cider stacktrace               # last exception, project frames only
+clj-skill cider inspect '(big-thing)'    # a paged view instead of the whole value
+```
+
+To enable these, add the middleware to the alias you start your REPL with:
 
 ```clojure
 {:aliases
@@ -80,44 +94,69 @@ Add the middleware to the alias you start your REPL with:
                       "--middleware" "[cider.nrepl/cider-middleware]"]}}}
 ```
 
-`clj-skill repl ports` marks which running servers have it.
-
-## Usage
-
-Run `clj-skill --help` for the full command list, or read
-[SKILL.md](./SKILL.md) — that is what the agent reads.
+### Static analysis — needs clojure-lsp
 
 ```bash
-clj-skill outline src/my/ns.clj                    # 2000 lines -> 40
-clj-skill find '(defmethod &)' src                 # search by shape
-clj-skill replace src/my/ns.clj '(defn my-fn &)' <<'EOF'
-(defn my-fn [x] (inc x))
-EOF
-clj-skill repl eval -p 7888 <<'EOF'
-(+ 1 2 3)
-EOF
-clj-skill cider test my.ns-test                    # only what failed
-clj-skill cider stacktrace                         # only your frames
+clj-skill lsp diagnostics --file src/my/ns.clj
+clj-skill lsp references --file src/my/ns.clj --line 10 --col 5
+clj-skill lsp definition --file src/my/ns.clj --line 10 --col 5
+clj-skill lsp hover      --file src/my/ns.clj --line 10 --col 5
 ```
+
+`cider` answers about what is loaded right now; `lsp` answers from a static index
+and works on code that was never evaluated.
+
+## Optional: automatic paren repair (Claude Code)
+
+```bash
+bb install-hooks
+```
+
+Registers hooks so unbalanced delimiters are repaired on every Write and Edit,
+and an Edit that cannot be repaired is rolled back instead of left broken. Off by
+default; `bb uninstall-hooks` removes it.
 
 ## Development
 
 ```bash
-bb test        # clojure.test over test/
-bb tasks       # everything available
+bb test     # clojure.test over test/
+bb tasks    # everything available
 ```
 
 ## Uninstall
 
 ```bash
-bb uninstall                          # binary + hooks (also removes pre-1.0 binaries)
+bb uninstall                          # binary + hooks
 rm ~/.claude/skills/clojure-skills    # and any other symlinks you made
 ```
 
+## Upgrading from before the single-binary rewrite
+
+Up to [`37dda76`](https://github.com/chaploud/clojure-skills/commit/37dda76) this
+skill installed five separate binaries. They are now one, `clj-skill`, with the
+old tools as subcommands:
+
+| Before | Now |
+|---|---|
+| `clj-paren-repair FILE` | `clj-skill repair FILE` |
+| `clj-nrepl-eval -p PORT CODE` | `clj-skill repl eval -p PORT CODE` |
+| `clj-nrepl-eval --discover-ports` | `clj-skill repl ports` |
+| `clj-nrepl-eval --connected-ports` | `clj-skill repl connected` |
+| `clj-nrepl-eval -p PORT --reset-session` | `clj-skill repl reset -p PORT` |
+| `clj-lsp-client diagnostics` | `clj-skill lsp diagnostics` |
+| `clj-lsp-client references --file F --line N --col N` | `clj-skill lsp references --file F --line N --col N` |
+| `clj-lsp-bridge warm ROOT` | `clj-skill lsp-bridge warm ROOT` |
+| `clj-paren-repair-claude-hook` | `clj-skill hook` |
+
+Run `git pull && bb install` from your clone. `bb install` removes the five old
+binaries, and `bb install-hooks` rewrites the hook entry in
+`~/.claude/settings.json` if you had it. Anything of your own that calls the old
+names — shell aliases, editor config, scripts — needs updating by hand.
+
 ## Attribution
 
-Derived from [clojure-mcp-light](https://github.com/bhauman/clojure-mcp-light)
-by Bruce Hauman (EPL-2.0).
+Derived from [clojure-mcp-light](https://github.com/bhauman/clojure-mcp-light) by
+Bruce Hauman (EPL-2.0).
 
 ## License
 

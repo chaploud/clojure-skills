@@ -7,14 +7,23 @@
   (:require [babashka.fs :as fs]
             [babashka.process :as process]
             [clojure.string :as str]
+            [clojure-skill.claude-settings :as settings]
             [clojure-skill.repl :as repl]))
+
+(def ^:private probe-timeout-ms 5000)
 
 (defn- on-path?
   "Whether cmd actually runs. Invoking it beats looking it up on PATH: a broken
-  symlink or a wrapper that cannot start is reported as unusable, not present."
+  symlink or a wrapper that cannot start is reported as unusable, not present.
+
+  A command that never answers is reported as unusable rather than hanging the
+  whole report."
   [cmd]
   (try
-    (zero? (:exit (process/sh [cmd "--version"])))
+    (let [proc (process/process [cmd "--version"] {:out :string :err :string})]
+      (if (deref proc probe-timeout-ms nil)
+        (zero? (:exit @proc))
+        (do (process/destroy-tree proc) false)))
     (catch Exception _ false)))
 
 (defn- line
@@ -37,11 +46,6 @@
       (println)
       (println (format "warning: %s is ignored since cljfmt 0.16 — rename it to .cljfmt.edn"
                        (str/join ", " stale))))))
-
-(defn- check-hooks []
-  (let [settings (fs/path (fs/home) ".claude" "settings.json")]
-    (and (fs/exists? settings)
-         (str/includes? (slurp (str settings)) "clj-skill hook"))))
 
 (defn- report-servers []
   (println)
@@ -79,7 +83,7 @@
           :optional)
     (println)
     (println "Claude Code integration")
-    (let [hooks? (check-hooks)]
+    (let [hooks? (settings/hooks-installed?)]
       (line hooks? "auto paren-repair hooks"
             (if hooks? "registered in ~/.claude/settings.json" "opt-in: bb install-hooks")
             :optional))

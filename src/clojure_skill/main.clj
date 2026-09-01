@@ -51,6 +51,7 @@ Static analysis (needs clojure-lsp)
   lsp definition --file F --line N --col N
   lsp hover      --file F --line N --col N
   lsp start | stop | status          bridge lifecycle
+  lsp-bridge warm [ROOT]             index the project ahead of a first query
 
   doctor                             what works here, and how to enable the rest
 
@@ -79,6 +80,8 @@ Line and column numbers are 1-based everywhere, matching editors and ripgrep.")
   evaluating against another project's REPL."
   [opts]
   (or (:port opts)
+      (when (:host opts)
+        (throw (ex-info "--port is required with --host: discovery only probes this machine" {})))
       (let [here (filter :matches-cwd ((requiring-resolve 'clojure-skill.repl/discover)))]
         (case (count here)
           1 (:port (first here))
@@ -93,13 +96,17 @@ Line and column numbers are 1-based everywhere, matching editors and ripgrep.")
    :port (resolve-port opts)
    :timeout-ms (or (:timeout opts) 120000)})
 
-(defn- stdin-available?
-  "Whether stdin has data now — true for a pipe or heredoc, false for a terminal."
+(defn- stdin-redirected?
+  "Whether stdin is a pipe, heredoc or file rather than the terminal.
+
+  Asking the console, not `.ready`, because a pipe whose producer has not written
+  yet is not ready but will be — testing readiness makes `echo code | …`
+  intermittently report that no code was given."
   []
-  (try (.ready *in*) (catch Exception _ false)))
+  (nil? (System/console)))
 
 (defn- code-arg [args]
-  (or (first args) (when (stdin-available?) (slurp *in*))))
+  (or (first args) (when (stdin-redirected?) (slurp *in*))))
 
 ;; ============================================================================
 ;; Dispatch
@@ -108,11 +115,25 @@ Line and column numbers are 1-based everywhere, matching editors and ripgrep.")
 (defn- call [sym & args]
   (apply (requiring-resolve sym) args))
 
+(defn- required
+  "Value, or an error naming what the command expected.
+
+  Checked before anything connects or reads, so a forgotten argument fails with a
+  usage message rather than a query for the symbol `null`."
+  [value what usage]
+  (when (or (nil? value) (and (string? value) (str/blank? value)))
+    (throw (ex-info (format "%s is required — usage: %s" what usage) {})))
+  value)
+
 (defn- run-sexp [cmd args opts]
   (case cmd
-    "outline" (do (call 'clojure-skill.sexp/outline args opts) 0)
-    "find" (do (call 'clojure-skill.sexp/find-forms (first args) (rest args) opts) 0)
-    "replace" (call 'clojure-skill.sexp/replace-form (first args) (second args) opts)))
+    "outline" (do (required (first args) "FILE" "clj-skill outline FILE...")
+                  (call 'clojure-skill.sexp/outline args opts))
+    "find" (do (required (first args) "PATTERN" "clj-skill find PATTERN [PATH...]")
+               (call 'clojure-skill.sexp/find-forms (first args) (rest args) opts))
+    "replace" (do (required (first args) "FILE" "clj-skill replace FILE PATTERN")
+                  (required (second args) "PATTERN" "clj-skill replace FILE PATTERN")
+                  (call 'clojure-skill.sexp/replace-form (first args) (second args) opts))))
 
 (defn- run-repl [args opts]
   (case (first args)
@@ -129,28 +150,38 @@ Line and column numbers are 1-based everywhere, matching editors and ripgrep.")
 
 (defn- run-cider [args opts]
   (let [[cmd & rest-args] args
-        conn (connection opts)
-        flags (select-keys opts [:ns :all])]
+        arg #(required (first rest-args) % (str "clj-skill cider " cmd " " %))
+        flags (select-keys opts [:ns :all])
+        ;; the argument is validated before `connection` runs, so a missing one
+        ;; does not cost a round trip to a REPL
+        conn #(connection opts)]
     (case cmd
-      "ops" (call 'clojure-skill.cider/ops conn)
-      "info" (call 'clojure-skill.cider/info conn (first rest-args) flags)
-      "refs" (call 'clojure-skill.cider/refs conn (first rest-args) flags)
-      "deps" (call 'clojure-skill.cider/deps conn (first rest-args) flags)
-      "apropos" (call 'clojure-skill.cider/apropos conn (first rest-args) flags)
-      "ns-vars" (call 'clojure-skill.cider/ns-vars conn (first rest-args) flags)
-      "test" (call 'clojure-skill.cider/run-tests conn rest-args flags)
-      "retest" (call 'clojure-skill.cider/retest conn flags)
-      "stacktrace" (call 'clojure-skill.cider/stacktrace conn flags)
-      "inspect" (call 'clojure-skill.cider/inspect conn (code-arg rest-args) flags)
+      "ops" (call 'clojure-skill.cider/ops (conn))
+      "info" (call 'clojure-skill.cider/info (conn) (arg "SYM") flags)
+      "refs" (call 'clojure-skill.cider/refs (conn) (arg "SYM") flags)
+      "deps" (call 'clojure-skill.cider/deps (conn) (arg "SYM") flags)
+      "apropos" (call 'clojure-skill.cider/apropos (conn) (arg "PATTERN") flags)
+      "ns-vars" (call 'clojure-skill.cider/ns-vars (conn) (arg "NS") flags)
+      "test" (call 'clojure-skill.cider/run-tests (conn) rest-args flags)
+      "retest" (call 'clojure-skill.cider/retest (conn) flags)
+      "stacktrace" (call 'clojure-skill.cider/stacktrace (conn) flags)
+      "inspect" (call 'clojure-skill.cider/inspect (conn)
+                      (required (code-arg rest-args) "CODE" "clj-skill cider inspect CODE")
+                      flags)
       (do (binding [*out* *err*] (println (str "unknown cider command: " cmd))) 1))))
 
 (defn- run-lsp [args opts]
-  (let [root (call 'clojure-skill.lsp/resolve-root opts)]
-    (case (first args)
+  (let [root (call 'clojure-skill.lsp/resolve-root opts)
+        cmd (first args)
+        position #(do (required (:file opts) "--file" (str "clj-skill lsp " cmd " --file F --line N --col N"))
+                      (required (:line opts) "--line" (str "clj-skill lsp " cmd " --file F --line N --col N"))
+                      (required (:col opts) "--col" (str "clj-skill lsp " cmd " --file F --line N --col N"))
+                      opts)]
+    (case cmd
       "diagnostics" (call 'clojure-skill.lsp/diagnostics root opts)
-      "references" (call 'clojure-skill.lsp/references root opts)
-      "definition" (call 'clojure-skill.lsp/definition root opts)
-      "hover" (call 'clojure-skill.lsp/hover root opts)
+      "references" (call 'clojure-skill.lsp/references root (position))
+      "definition" (call 'clojure-skill.lsp/definition root (position))
+      "hover" (call 'clojure-skill.lsp/hover root (position))
       "start" (call 'clojure-skill.lsp/start root)
       "stop" (call 'clojure-skill.lsp/stop root)
       "status" (call 'clojure-skill.lsp/status root)
@@ -173,12 +204,15 @@ Line and column numbers are 1-based everywhere, matching editors and ripgrep.")
         1)))
 
 (defn -main [& argv]
-  (let [{:keys [args opts]} (cli/parse-args argv cli-spec)]
-    (System/exit
-     (if (or (:help opts) (empty? args))
-       (do (println help-text) 0)
-       (try
-         (dispatch args opts)
-         (catch clojure.lang.ExceptionInfo e
-           (binding [*out* *err*] (println (ex-message e)))
-           1))))))
+  (System/exit
+   (try
+     (let [{:keys [args opts]} (cli/parse-args argv cli-spec)]
+       (if (or (:help opts) (empty? args))
+         (do (println help-text) 0)
+         (dispatch args opts)))
+     ;; Every failure gets one line on stderr. Option parsing is inside the try
+     ;; too, so a malformed flag reads like the rest of the CLI rather than
+     ;; dumping a stack trace at the agent.
+     (catch Exception e
+       (binding [*out* *err*] (println (or (ex-message e) (str e))))
+       1))))

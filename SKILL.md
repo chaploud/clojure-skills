@@ -42,7 +42,7 @@ reports as unavailable — use the alternative named below instead.
 | Map a large file before reading it | `clj-skill outline FILE` | nothing |
 | Find code by its *shape* | `clj-skill find PATTERN [PATH…]` | nothing |
 | Rewrite a whole top-level form | `clj-skill replace FILE PATTERN` | nothing |
-| Find code by its *text* | `rg` | nothing |
+| Find code by its *text* | `rg` | ripgrep |
 | Balance delimiters / format | `clj-skill repair FILE…` | nothing |
 | Evaluate code | `clj-skill repl eval` | nREPL |
 | Callers of a function | `clj-skill cider refs SYM` | cider-nrepl |
@@ -80,11 +80,15 @@ clj-skill find '(rf/reg-event-fx _ &)' src/app --limit 100
 A pattern is a Clojure form in which:
 
 - `_` matches any single form
-- `&` matches the rest of a sequence (and only makes sense as the last element)
+- `&` matches the rest of a sequence, and must be its last element
 
-Everything else must match exactly as written, including collection type — `(a b)`
-does not match `[a b]`. Without a trailing `&` the arity is exact: `(inc _)`
-matches `(inc 1)` but not `(inc 1 2)`.
+Everything else matches exactly as written:
+
+- collection type counts — `(a b)` does not match `[a b]`
+- arity is exact without a trailing `&` — `(inc _)` matches `(inc 1)`, not `(inc 1 2)`
+- collections match in written order — `{:a 1 :b 2}` does not match `{:b 2 :a 1}`
+- `'x` and `(quote x)` are different forms and do not match each other
+- metadata is seen through — `(defn foo &)` matches `(defn ^:private foo [] 1)`
 
 Prints `path:line:col: <first line of the match>`. Defaults to 50 matches;
 raise it with `--limit`.
@@ -173,7 +177,8 @@ walking up from `--file` to the nearest `deps.edn`/`project.clj`/`bb.edn`/
 A definition inside a dependency is printed as `/abs/to/foo.jar:inner/ns.clj:LINE:COL`.
 
 The first start on a cold, large project can take minutes while clojure-lsp
-indexes; `clj-skill lsp-bridge warm ROOT` does that ahead of time.
+indexes. Run `clj-skill lsp-bridge warm ROOT` ahead of time — at login, or after
+creating a worktree — to do that indexing before it is needed.
 
 ## Notes
 
@@ -182,3 +187,6 @@ indexes; `clj-skill lsp-bridge warm ROOT` does that ahead of time.
 - Reader conditionals, `#js`, `#dart` and other tagged literals are handled
   throughout — structural commands compare what is written, not what it expands to
 - Automatic paren repair on every Write/Edit is opt-in: `bb install-hooks`
+- A command that could not do its job exits non-zero and says why on stderr.
+  `;; no match` and `;; no references` mean the search ran and found nothing —
+  they are never printed for a search that failed

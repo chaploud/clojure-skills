@@ -33,33 +33,37 @@
     (.flush out)))
 
 (defn read-lsp-message
-  "Read a JSON-RPC message from a BufferedReader.
-  Parses Content-Length header, reads body, returns parsed JSON map.
-  Returns nil on EOF."
+  "Read one JSON-RPC message from reader.
+
+  Returns the parsed message, ::eof when clojure-lsp closed the stream, or
+  ::malformed when a message could not be read. The two failures are kept apart
+  because ::eof means the server is gone for good while ::malformed is one bad
+  message the reader can skip — collapsing them into nil made a parse error look
+  like a dead server, and vice versa."
   [^BufferedReader reader]
   (try
     (loop [content-length nil]
       (let [line (.readLine reader)]
         (cond
-          (nil? line) nil ;; EOF
+          (nil? line) ::eof
 
           (str/blank? line)
-          ;; End of headers — read body
           (if content-length
             (let [buf (char-array content-length)]
               (loop [offset 0]
                 (when (< offset content-length)
                   (let [n (.read reader buf offset (- content-length offset))]
-                    (when (pos? n)
-                      (recur (+ offset n))))))
+                    (if (pos? n)
+                      (recur (+ offset n))
+                      (throw (ex-info "truncated LSP message body" {}))))))
               (json/parse-string (String. buf) true))
             (recur nil))
 
           :else
           (let [[_ len-str] (re-matches #"Content-Length:\s*(\d+)" line)]
             (recur (if len-str (parse-long len-str) content-length))))))
-    (catch Exception _
-      nil)))
+    (catch java.io.IOException _ ::eof)
+    (catch Exception _ ::malformed)))
 
 ;; ============================================================================
 ;; LSP Request/Response Management
@@ -77,6 +81,13 @@
 (def ^:private diagnostics-cache
   "Map of file-uri -> diagnostics vector"
   (atom {}))
+
+(def ^:private lsp-alive?
+  "False once the reader loop has seen clojure-lsp close its stream.
+
+  Without this the bridge keeps answering queries with empty results after the
+  server dies, and every answer reads as \"nothing found\"."
+  (atom true))
 
 (defn make-lsp-request
   "Create an LSP JSON-RPC request map."
@@ -107,19 +118,22 @@
   A definition inside a dependency keeps both halves visible — the jar and the
   entry within it — rather than being reported as an opaque archive URI.
 
-    file://…                -> /abs/path
-    zipfile://…jar::inner   -> /abs/to.jar:inner
-    jar:file://…jar!/inner  -> /abs/to.jar:inner"
+    file:…                -> /abs/path
+    zipfile:…jar::inner   -> /abs/to.jar:inner
+    jar:file:…jar!/inner  -> /abs/to.jar:inner
+
+  Each scheme is matched without fixing the number of slashes after it, because
+  clojure-lsp emits file:/// while the JDK's own jar URIs use a single slash."
   [uri]
   (cond
-    (str/starts-with? uri "file://")
-    (str/replace-first uri #"^file://" "")
+    (str/starts-with? uri "jar:file:")
+    (-> uri (str/replace-first #"^jar:file:/*" "/") (str/replace "!/" ":"))
 
-    (str/starts-with? uri "zipfile://")
-    (-> uri (str/replace-first #"^zipfile://" "") (str/replace "::" ":"))
+    (str/starts-with? uri "zipfile:")
+    (-> uri (str/replace-first #"^zipfile:/*" "/") (str/replace "::" ":"))
 
-    (str/starts-with? uri "jar:file://")
-    (-> uri (str/replace-first #"^jar:file://" "") (str/replace "!/" ":"))
+    (str/starts-with? uri "file:")
+    (str/replace-first uri #"^file:/*" "/")
 
     :else uri))
 
@@ -130,8 +144,11 @@
   (let [pb (ProcessBuilder. ["clojure-lsp" "--stdio"])
         _ (.directory pb (io/file project-root))
         env (.environment pb)]
-    ;; Don't inherit parent env's CLASSPATH to avoid conflicts
+    ;; Don't inherit the parent's CLASSPATH: clojure-lsp resolves its own.
     (.remove env "CLASSPATH")
+    ;; clojure-lsp's stderr goes to ours rather than to a pipe nobody drains —
+    ;; a full pipe buffer would deadlock the subprocess.
+    (.redirectError pb java.lang.ProcessBuilder$Redirect/INHERIT)
     (.start pb)))
 
 (defn initialize-lsp
@@ -185,32 +202,41 @@
   (future
     (try
       (loop []
-        (when-let [msg (read-lsp-message lsp-reader)]
-          ;; Route message
+        (let [msg (read-lsp-message lsp-reader)]
           (cond
-            ;; Response to a request
-            (:id msg)
-            (when-let [p (get @pending-requests (:id msg))]
-              (deliver p msg)
-              (swap! pending-requests dissoc (:id msg)))
+            (= ::eof msg) (reset! lsp-alive? false)
 
-            ;; Diagnostics notification
-            (= (:method msg) "textDocument/publishDiagnostics")
-            (let [uri (get-in msg [:params :uri])
-                  diags (get-in msg [:params :diagnostics])]
-              (swap! diagnostics-cache assoc uri diags))
+            ;; one unreadable message is survivable; keep reading
+            (= ::malformed msg) (recur)
 
-            ;; Other notifications — ignore
-            :else nil)
-          (recur)))
+            :else
+            (do
+              (cond
+                (:id msg)
+                (when-let [p (get @pending-requests (:id msg))]
+                  (deliver p msg)
+                  (swap! pending-requests dissoc (:id msg)))
+
+                (= (:method msg) "textDocument/publishDiagnostics")
+                (swap! diagnostics-cache assoc
+                       (get-in msg [:params :uri])
+                       (get-in msg [:params :diagnostics]))
+
+                :else nil)
+              (recur)))))
       (catch Exception _
-        ;; Reader closed, LSP process likely terminated
-        nil))))
+        (reset! lsp-alive? false)))))
 
 (defn send-lsp-request!
-  "Send a request to clojure-lsp and wait for response.
-  Returns the response map or nil on timeout."
+  "Send a request to clojure-lsp and wait for its response.
+
+  Throws rather than returning nil on failure: a timeout, a dead server or a
+  JSON-RPC error would otherwise be indistinguishable from an empty result, and
+  the caller would report \"no references\" for a query that never ran."
   [lsp-out method params & {:keys [timeout-ms] :or {timeout-ms 30000}}]
+  (when-not @lsp-alive?
+    (throw (ex-info "clojure-lsp is no longer running; restart the bridge with `clj-skill lsp stop` then retry"
+                    {:method method})))
   (let [req (make-lsp-request method params)
         id (:id req)
         p (promise)]
@@ -218,8 +244,17 @@
     (write-lsp-message lsp-out req)
     (let [result (deref p timeout-ms ::timeout)]
       (swap! pending-requests dissoc id)
-      (when (not= result ::timeout)
-        result))))
+      (cond
+        (= result ::timeout)
+        (throw (ex-info (format "clojure-lsp did not answer %s within %dms" method timeout-ms)
+                        {:method method}))
+
+        (:error result)
+        (throw (ex-info (format "clojure-lsp rejected %s: %s" method
+                                (get-in result [:error :message] "unknown error"))
+                        {:method method}))
+
+        :else result))))
 
 ;; ============================================================================
 ;; Client Command Handlers
@@ -277,17 +312,21 @@
     {:hover (get-in resp [:result :contents])}))
 
 (defn handle-client-command
-  "Dispatch client command and return response map."
+  "Dispatch a client command, reporting a failed LSP request as {:error msg}
+  rather than as an empty result."
   [lsp-out {:keys [command] :as request}]
-  (case command
-    "status" {:status "running"
-              :diagnostics-count (count @diagnostics-cache)}
-    "diagnostics" (handle-diagnostics request)
-    "references" (handle-references lsp-out request)
-    "definition" (handle-definition lsp-out request)
-    "hover" (handle-hover lsp-out request)
-    "stop" {:status "stopping"}
-    {:error (str "Unknown command: " command)}))
+  (try
+    (case command
+      "status" {:status (if @lsp-alive? "running" "lsp-terminated")
+                :diagnostics-count (count @diagnostics-cache)}
+      "diagnostics" (handle-diagnostics request)
+      "references" (handle-references lsp-out request)
+      "definition" (handle-definition lsp-out request)
+      "hover" (handle-hover lsp-out request)
+      "stop" {:status "stopping"}
+      {:error (str "unknown command: " command)})
+    (catch Exception e
+      {:error (ex-message e)})))
 
 ;; ============================================================================
 ;; TCP Server for Client Connections
