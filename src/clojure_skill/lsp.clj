@@ -253,9 +253,12 @@
 (defn- bridge-processes
   "Live bridge processes started for root, found by their command line.
 
-  The pid file can be gone while the process lives — a bridge killed with
-  SIGKILL never runs the shutdown hook that removes it — and such an orphan
-  keeps clojure-lsp and its several hundred MB alive."
+  Needed because the pid file and the process can disagree in either direction,
+  and only one of the two costs memory: a bridge whose files were removed keeps
+  running, with clojure-lsp and its index still resident. The reverse — files
+  left behind by a bridge killed with SIGKILL — is harmless, and clojure-lsp
+  follows its parent down on its own, since it exits when the stdin pipe it
+  reads closes."
   [root]
   (let [marker (str "lsp-bridge start " root)]
     (->> (java.lang.ProcessHandle/allProcesses)
