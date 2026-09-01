@@ -6,8 +6,9 @@ search and editing instead of `sed`, a file outline instead of reading two
 thousand lines, failing assertions instead of a test log, and the three project
 frames of a stacktrace instead of sixty.
 
-Works with Claude Code, Codex CLI, Gemini CLI, and any agent that can run shell
-commands. Covers `.clj`, `.cljs`, `.cljc`, `.cljd`, `.edn`, `.bb` and `.lpy`.
+Follows the [Agent Skills](https://agentskills.io) open standard, so it works
+with Claude Code, Codex CLI, Gemini CLI and the other clients that adopted it.
+Covers `.clj`, `.cljs`, `.cljc`, `.cljd`, `.edn`, `.bb` and `.lpy`.
 
 ## Install
 
@@ -21,12 +22,14 @@ That installs one binary, `clj-skill`, and then runs `clj-skill doctor`, which
 reports what works on your machine and how to enable the rest. Running it again
 is safe.
 
-Then link the skill for whichever agents you use:
+Then link the skill where your agents look for one:
 
 ```bash
-mkdir -p ~/.claude/skills && ln -s ~/clojure-skills ~/.claude/skills/clojure-skills   # Claude Code
-mkdir -p ~/.agents/skills && ln -s ~/clojure-skills ~/.agents/skills/clojure-skills   # Codex CLI
-mkdir -p ~/.gemini/skills && ln -s ~/clojure-skills ~/.gemini/skills/clojure-skills   # Gemini CLI
+# Codex CLI and Gemini CLI both read this one
+mkdir -p ~/.agents/skills && ln -s ~/clojure-skills ~/.agents/skills/clojure-skills
+
+# Claude Code
+mkdir -p ~/.claude/skills && ln -s ~/clojure-skills ~/.claude/skills/clojure-skills
 ```
 
 ### Requirements

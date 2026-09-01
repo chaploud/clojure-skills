@@ -8,13 +8,15 @@ description: >-
 compatibility: >-
   Every command is a shell command, so any agent with shell access can use
   them. The optional automatic paren-repair hooks are Claude Code specific.
-globs:
+license: EPL-2.0
+paths:
   - "**/*.clj"
   - "**/*.cljs"
   - "**/*.cljc"
   - "**/*.cljd"
   - "**/*.edn"
   - "**/*.bb"
+  - "**/*.lpy"
 user-invocable: false
 hooks:
   Stop:
