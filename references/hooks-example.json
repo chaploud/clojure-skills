@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "clj-paren-repair-claude-hook --cljfmt"
+            "command": "clj-skill hook --cljfmt"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "clj-paren-repair-claude-hook --cljfmt"
+            "command": "clj-skill hook --cljfmt"
           }
         ]
       }
@@ -27,11 +27,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "clj-paren-repair-claude-hook"
+            "command": "clj-skill hook --cljfmt"
           },
           {
             "type": "command",
-            "command": "clj-lsp-client stop 2>/dev/null; true"
+            "command": "clj-skill lsp stop 2>/dev/null; true"
           }
         ]
       }

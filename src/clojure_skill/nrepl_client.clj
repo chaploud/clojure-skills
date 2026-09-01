@@ -3,41 +3,22 @@
   (:require [babashka.fs :as fs]
             [bencode.core :as b]
             [clojure.edn :as edn]
+            [clojure.walk :as walk]
             [clojure-skill.tmp :as tmp]))
 
 ;; ============================================================================
 ;; Message encoding/decoding
 ;; ============================================================================
 
-(defmulti bytes->str
-  "Recursively convert byte arrays to strings in nested structures"
-  class)
-
-(defmethod bytes->str :default
-  [x]
-  x)
-
-(defmethod bytes->str (Class/forName "[B")
-  [^bytes x]
-  (String. x "UTF-8"))
-
-(defmethod bytes->str clojure.lang.IPersistentVector
-  [v]
-  (mapv bytes->str v))
-
-(defmethod bytes->str clojure.lang.IPersistentMap
-  [m]
-  (->> m
-       (map (fn [[k v]] [(bytes->str k) (bytes->str v)]))
-       (into {})))
-
 (defn read-msg
-  "Decode a raw bencode message map into a Clojure map with keyword keys.
-  Recursively converts all byte arrays to strings."
+  "Decode a raw bencode message into a map with keyword keys.
+
+  Only the top-level keys become keywords: op responses nest maps whose keys are
+  data (test namespaces, var names), and callers destructure those with :strs."
   [msg]
-  (let [decoded (bytes->str msg)]
-    (zipmap (map keyword (keys decoded))
-            (vals decoded))))
+  (reduce-kv (fn [m k v] (assoc m (keyword k) v))
+             {}
+             (walk/postwalk #(if (bytes? %) (String. ^bytes % "UTF-8") %) msg)))
 
 (defn coerce-long [x]
   (if (string? x) (Long/parseLong x) x))
@@ -56,17 +37,15 @@
 ;; ============================================================================
 
 (defn message-seq
-  "Create lazy sequence of raw bencode messages from input stream.
-  Continues until EOF or error. Returns nils after stream ends."
-  [in]
-  (repeatedly
-   #(b/read-bencode in)))
+  "Lazy sequence of raw bencode messages from an input stream.
 
-(defn decode-messages
-  "Map raw bencode message sequence through decoder.
-  Stops at first nil (EOF/error)."
-  [msg-seq]
-  (map read-msg (take-while some? msg-seq)))
+  Ends by throwing EOFException when the server closes the connection; callers
+  report that as a protocol or session error rather than as end of input."
+  [in]
+  (repeatedly #(b/read-bencode in)))
+
+(defn decode-messages [msg-seq]
+  (map read-msg msg-seq))
 
 (defn filter-id
   "Filter messages by message id."
@@ -269,3 +248,60 @@
           (:sessions response))))
     (catch Exception _
       nil)))
+
+;; ============================================================================
+;; Environment detection and shared sessions
+;; ============================================================================
+
+(defn detect-env-type
+  "Classify an nREPL server from its describe response.
+
+  Always returns a keyword — :clj, :bb, :basilisp, :scittle or :unknown — so
+  callers can name it without guarding for nil."
+  [describe-response]
+  (let [versions (:versions describe-response)]
+    (cond
+      (or (get versions :clojure) (get versions "clojure")) :clj
+      (or (get versions :babashka) (get versions "babashka")) :bb
+      (or (get versions :basilisp) (get versions "basilisp")) :basilisp
+      (or (get versions :sci-nrepl) (get versions "sci-nrepl")) :scittle
+      :else :unknown)))
+
+(defn shadow-cljs?
+  "Whether the server is shadow-cljs, detected from the namespace it evaluates in."
+  [conn]
+  (try
+    (= "shadow.user" (:ns (eval-nrepl* conn "1")))
+    (catch Exception _ false)))
+
+(defn describe-session
+  "Describe the server and return {:env-type :ops}, where :ops is the set of op
+   names it supports."
+  [conn]
+  (let [resp (describe-nrepl* conn)
+        base (detect-env-type resp)]
+    {:env-type (if (shadow-cljs? conn) :shadow base)
+     :ops (set (map name (keys (:ops resp))))}))
+
+(defn ensure-session
+  "Return session data for conn, reusing the stored session when the server still
+   knows it and cloning a fresh one otherwise.
+
+   The session file is keyed by host:port and shared by every subcommand, which
+   is what lets `cider stacktrace` see the exception `repl eval` just raised.
+
+   Returns {:session-id :env-type :ops}."
+  [conn]
+  (let [{:keys [host port]} conn
+        stored (slurp-nrepl-session host port)
+        stored-id (:session-id stored)
+        active (when stored-id (:sessions (ls-sessions* conn)))]
+    (if (and stored-id (some #{stored-id} active) (:ops stored))
+      stored
+      (do
+        (when stored-id (delete-nrepl-session host port))
+        (let [session-id (:new-session (clone-session* conn))
+              data (merge {:session-id session-id} (describe-session conn))]
+          (spit-nrepl-session data host port)
+          data)))))
+

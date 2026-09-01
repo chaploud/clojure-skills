@@ -149,12 +149,6 @@
 ;; Specific File Paths
 ;; ============================================================================
 
-(defn nrepl-session-file
-  "Get path to nREPL session file.
-  This file stores the persistent nREPL session ID."
-  [ctx]
-  (str (fs/path (nrepl-dir ctx) "session.edn")))
-
 (defn nrepl-target-file
   "Get path to nREPL session file for a specific target (host:port combination).
   Each host:port gets its own session file for independent session management."
@@ -221,37 +215,22 @@
 ;; ============================================================================
 
 (defn cleanup-session!
-  "Clean up temporary files for this Claude Code session.
+  "Delete this session's temp directories.
 
-  Attempts to delete session directories for all possible session IDs
-  (both env-based and GPID-based) to ensure cleanup works regardless
-  of which ID was actually used during the session.
+  Every id the session could have used is tried, because a hook that received an
+  explicit session id and a command that fell back to the process id write under
+  different roots.
 
-  Parameters:
-  - :session-id - Optional explicit session ID (e.g., from Stop hook)
-  - :gpid       - Optional grandparent process ID
-
-  Returns a cleanup report map:
-  - :attempted - List of session IDs for which cleanup was attempted
-  - :deleted   - List of successfully deleted directory paths
-  - :errors    - List of {:path path :error error-msg} maps for failures
-  - :skipped   - List of paths that didn't exist (skipped silently)"
+  Returns {:attempted :deleted :skipped :errors}."
   [{:keys [session-id gpid]}]
-  (let [session-ids (get-possible-session-ids {:session-id session-id :gpid gpid})
-        results (atom {:attempted session-ids
-                       :deleted []
-                       :errors []
-                       :skipped []})]
-    (doseq [sess-id session-ids]
-      (let [sess-dir (session-root {:session-id sess-id})]
-        (try
-          (if (fs/exists? sess-dir)
-            (do
-              (fs/delete-tree sess-dir)
-              (swap! results update :deleted conj sess-dir))
-            (swap! results update :skipped conj sess-dir))
-          (catch Exception e
-            (swap! results update :errors conj
-                   {:path sess-dir
-                    :error (.getMessage e)})))))
-    @results))
+  (let [session-ids (get-possible-session-ids {:session-id session-id :gpid gpid})]
+    (reduce (fn [report sess-id]
+              (let [dir (session-root {:session-id sess-id})]
+                (try
+                  (if (fs/exists? dir)
+                    (do (fs/delete-tree dir) (update report :deleted conj dir))
+                    (update report :skipped conj dir))
+                  (catch Exception e
+                    (update report :errors conj {:path dir :error (ex-message e)})))))
+            {:attempted session-ids :deleted [] :skipped [] :errors []}
+            session-ids)))

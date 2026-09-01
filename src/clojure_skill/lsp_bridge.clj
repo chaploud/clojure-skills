@@ -33,33 +33,37 @@
     (.flush out)))
 
 (defn read-lsp-message
-  "Read a JSON-RPC message from a BufferedReader.
-  Parses Content-Length header, reads body, returns parsed JSON map.
-  Returns nil on EOF."
+  "Read one JSON-RPC message from reader.
+
+  Returns the parsed message, ::eof when clojure-lsp closed the stream, or
+  ::malformed when a message could not be read. The two failures are kept apart
+  because ::eof means the server is gone for good while ::malformed is one bad
+  message the reader can skip — collapsing them into nil made a parse error look
+  like a dead server, and vice versa."
   [^BufferedReader reader]
   (try
     (loop [content-length nil]
       (let [line (.readLine reader)]
         (cond
-          (nil? line) nil ;; EOF
+          (nil? line) ::eof
 
           (str/blank? line)
-          ;; End of headers — read body
           (if content-length
             (let [buf (char-array content-length)]
               (loop [offset 0]
                 (when (< offset content-length)
                   (let [n (.read reader buf offset (- content-length offset))]
-                    (when (pos? n)
-                      (recur (+ offset n))))))
+                    (if (pos? n)
+                      (recur (+ offset n))
+                      (throw (ex-info "truncated LSP message body" {}))))))
               (json/parse-string (String. buf) true))
             (recur nil))
 
           :else
           (let [[_ len-str] (re-matches #"Content-Length:\s*(\d+)" line)]
             (recur (if len-str (parse-long len-str) content-length))))))
-    (catch Exception _
-      nil)))
+    (catch java.io.IOException _ ::eof)
+    (catch Exception _ ::malformed)))
 
 ;; ============================================================================
 ;; LSP Request/Response Management
@@ -77,6 +81,13 @@
 (def ^:private diagnostics-cache
   "Map of file-uri -> diagnostics vector"
   (atom {}))
+
+(def ^:private lsp-alive?
+  "False once the reader loop has seen clojure-lsp close its stream.
+
+  Without this the bridge keeps answering queries with empty results after the
+  server dies, and every answer reads as \"nothing found\"."
+  (atom true))
 
 (defn make-lsp-request
   "Create an LSP JSON-RPC request map."
@@ -102,20 +113,27 @@
   (str (.toURI (io/file path))))
 
 (defn uri->file
-  "Convert an LSP location URI to a readable path.
-  file://…                → /abs/path
-  zipfile://…jar::inner   → /abs/to.jar:inner   (jar 内定義)
-  jar:file://…jar!/inner  → /abs/to.jar:inner"
+  "Turn an LSP location URI into a readable path.
+
+  A definition inside a dependency keeps both halves visible — the jar and the
+  entry within it — rather than being reported as an opaque archive URI.
+
+    file:…                -> /abs/path
+    zipfile:…jar::inner   -> /abs/to.jar:inner
+    jar:file:…jar!/inner  -> /abs/to.jar:inner
+
+  Each scheme is matched without fixing the number of slashes after it, because
+  clojure-lsp emits file:/// while the JDK's own jar URIs use a single slash."
   [uri]
   (cond
-    (str/starts-with? uri "file://")
-    (str/replace-first uri #"^file://" "")
+    (str/starts-with? uri "jar:file:")
+    (-> uri (str/replace-first #"^jar:file:/*" "/") (str/replace "!/" ":"))
 
-    (str/starts-with? uri "zipfile://")
-    (-> uri (str/replace-first #"^zipfile://" "") (str/replace "::" ":"))
+    (str/starts-with? uri "zipfile:")
+    (-> uri (str/replace-first #"^zipfile:/*" "/") (str/replace "::" ":"))
 
-    (str/starts-with? uri "jar:file://")
-    (-> uri (str/replace-first #"^jar:file://" "") (str/replace "!/" ":"))
+    (str/starts-with? uri "file:")
+    (str/replace-first uri #"^file:/*" "/")
 
     :else uri))
 
@@ -126,8 +144,11 @@
   (let [pb (ProcessBuilder. ["clojure-lsp" "--stdio"])
         _ (.directory pb (io/file project-root))
         env (.environment pb)]
-    ;; Don't inherit parent env's CLASSPATH to avoid conflicts
+    ;; Don't inherit the parent's CLASSPATH: clojure-lsp resolves its own.
     (.remove env "CLASSPATH")
+    ;; clojure-lsp's stderr goes to ours rather than to a pipe nobody drains —
+    ;; a full pipe buffer would deadlock the subprocess.
+    (.redirectError pb java.lang.ProcessBuilder$Redirect/INHERIT)
     (.start pb)))
 
 (defn initialize-lsp
@@ -181,32 +202,41 @@
   (future
     (try
       (loop []
-        (when-let [msg (read-lsp-message lsp-reader)]
-          ;; Route message
+        (let [msg (read-lsp-message lsp-reader)]
           (cond
-            ;; Response to a request
-            (:id msg)
-            (when-let [p (get @pending-requests (:id msg))]
-              (deliver p msg)
-              (swap! pending-requests dissoc (:id msg)))
+            (= ::eof msg) (reset! lsp-alive? false)
 
-            ;; Diagnostics notification
-            (= (:method msg) "textDocument/publishDiagnostics")
-            (let [uri (get-in msg [:params :uri])
-                  diags (get-in msg [:params :diagnostics])]
-              (swap! diagnostics-cache assoc uri diags))
+            ;; one unreadable message is survivable; keep reading
+            (= ::malformed msg) (recur)
 
-            ;; Other notifications — ignore
-            :else nil)
-          (recur)))
+            :else
+            (do
+              (cond
+                (:id msg)
+                (when-let [p (get @pending-requests (:id msg))]
+                  (deliver p msg)
+                  (swap! pending-requests dissoc (:id msg)))
+
+                (= (:method msg) "textDocument/publishDiagnostics")
+                (swap! diagnostics-cache assoc
+                       (get-in msg [:params :uri])
+                       (get-in msg [:params :diagnostics]))
+
+                :else nil)
+              (recur)))))
       (catch Exception _
-        ;; Reader closed, LSP process likely terminated
-        nil))))
+        (reset! lsp-alive? false)))))
 
 (defn send-lsp-request!
-  "Send a request to clojure-lsp and wait for response.
-  Returns the response map or nil on timeout."
+  "Send a request to clojure-lsp and wait for its response.
+
+  Throws rather than returning nil on failure: a timeout, a dead server or a
+  JSON-RPC error would otherwise be indistinguishable from an empty result, and
+  the caller would report \"no references\" for a query that never ran."
   [lsp-out method params & {:keys [timeout-ms] :or {timeout-ms 30000}}]
+  (when-not @lsp-alive?
+    (throw (ex-info "clojure-lsp is no longer running; restart the bridge with `clj-skill lsp stop` then retry"
+                    {:method method})))
   (let [req (make-lsp-request method params)
         id (:id req)
         p (promise)]
@@ -214,8 +244,17 @@
     (write-lsp-message lsp-out req)
     (let [result (deref p timeout-ms ::timeout)]
       (swap! pending-requests dissoc id)
-      (when (not= result ::timeout)
-        result))))
+      (cond
+        (= result ::timeout)
+        (throw (ex-info (format "clojure-lsp did not answer %s within %dms" method timeout-ms)
+                        {:method method}))
+
+        (:error result)
+        (throw (ex-info (format "clojure-lsp rejected %s: %s" method
+                                (get-in result [:error :message] "unknown error"))
+                        {:method method}))
+
+        :else result))))
 
 ;; ============================================================================
 ;; Client Command Handlers
@@ -231,61 +270,63 @@
        :uri uri})
     {:diagnostics @diagnostics-cache}))
 
+(defn- position-params
+  "LSP params for a request at file/line/col.
+
+  Clients speak 1-based line and column, as editors and ripgrep do; LSP counts
+  from zero."
+  [file line col]
+  {:textDocument {:uri (file->uri file)}
+   :position {:line (dec line) :character (dec col)}})
+
+(defn- location->result
+  "An LSP Location as a 1-based, path-shaped map."
+  [loc]
+  {:file (uri->file (:uri loc))
+   :line (inc (get-in loc [:range :start :line]))
+   :col (inc (get-in loc [:range :start :character]))
+   :end-line (inc (get-in loc [:range :end :line]))
+   :end-col (inc (get-in loc [:range :end :character]))})
+
 (defn handle-references
-  "Find references for symbol at position (line/col は 1-based)."
+  "Locations that reference the symbol at the given position."
   [lsp-out {:keys [file line col]}]
-  (let [uri (file->uri file)
-        resp (send-lsp-request! lsp-out "textDocument/references"
-                                {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character (dec col)}
-                                 :context {:includeDeclaration true}})]
-    {:references
-     (mapv (fn [loc]
-             {:file (uri->file (:uri loc))
-              :line (inc (get-in loc [:range :start :line]))
-              :col (inc (get-in loc [:range :start :character]))
-              :end-line (inc (get-in loc [:range :end :line]))
-              :end-col (inc (get-in loc [:range :end :character]))})
-           (:result resp))}))
+  (let [resp (send-lsp-request! lsp-out "textDocument/references"
+                                (assoc (position-params file line col)
+                                       :context {:includeDeclaration true}))]
+    {:references (mapv location->result (:result resp))}))
 
 (defn handle-definition
-  "Go to definition for symbol at position (line/col は 1-based)."
+  "Location the symbol at the given position is defined at."
   [lsp-out {:keys [file line col]}]
-  (let [uri (file->uri file)
-        resp (send-lsp-request! lsp-out "textDocument/definition"
-                                {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character (dec col)}})]
-    (let [result (:result resp)
-          ;; clojure-lsp may return a single location or array
-          locs (if (map? result) [result] result)]
-      {:definitions
-       (mapv (fn [loc]
-               {:file (uri->file (:uri loc))
-                :line (inc (get-in loc [:range :start :line]))
-                :col (inc (get-in loc [:range :start :character]))})
-             locs)})))
+  (let [result (:result (send-lsp-request! lsp-out "textDocument/definition"
+                                           (position-params file line col)))]
+    ;; clojure-lsp answers with a single location or a vector of them
+    {:definitions (mapv location->result (if (map? result) [result] result))}))
 
 (defn handle-hover
-  "Get hover information for symbol at position (line/col は 1-based)."
+  "Documentation for the symbol at the given position."
   [lsp-out {:keys [file line col]}]
-  (let [uri (file->uri file)
-        resp (send-lsp-request! lsp-out "textDocument/hover"
-                                {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character (dec col)}})]
+  (let [resp (send-lsp-request! lsp-out "textDocument/hover"
+                                (position-params file line col))]
     {:hover (get-in resp [:result :contents])}))
 
 (defn handle-client-command
-  "Dispatch client command and return response map."
+  "Dispatch a client command, reporting a failed LSP request as {:error msg}
+  rather than as an empty result."
   [lsp-out {:keys [command] :as request}]
-  (case command
-    "status" {:status "running"
-              :diagnostics-count (count @diagnostics-cache)}
-    "diagnostics" (handle-diagnostics request)
-    "references" (handle-references lsp-out request)
-    "definition" (handle-definition lsp-out request)
-    "hover" (handle-hover lsp-out request)
-    "stop" {:status "stopping"}
-    {:error (str "Unknown command: " command)}))
+  (try
+    (case command
+      "status" {:status (if @lsp-alive? "running" "lsp-terminated")
+                :diagnostics-count (count @diagnostics-cache)}
+      "diagnostics" (handle-diagnostics request)
+      "references" (handle-references lsp-out request)
+      "definition" (handle-definition lsp-out request)
+      "hover" (handle-hover lsp-out request)
+      "stop" {:status "stopping"}
+      {:error (str "unknown command: " command)})
+    (catch Exception e
+      {:error (ex-message e)})))
 
 ;; ============================================================================
 ;; TCP Server for Client Connections
@@ -391,20 +432,20 @@
   "Run a one-shot full-deps clojure-lsp stdio session to persist a
   server-reusable analysis cache, then exit.
 
-  clojure-lsp writes .lsp/.cache/db.transit.json only during startup
-  analysis, and the LSP server path uses :project-and-full-dependencies
-  (unlike the CLI `diagnostics`, which writes a server-incompatible
-  :project-only cache). Running this ahead of time (login / worktree
-  post-create) makes the first eglot / bridge start fast (warm initialize)."
+  clojure-lsp writes .lsp/.cache/db.transit.json only during startup analysis,
+  and only the server path analyses :project-and-full-dependencies — the CLI's
+  `diagnostics` writes a :project-only cache the server cannot reuse. Running
+  this ahead of time (at login, or after creating a worktree) is what makes the
+  first bridge or editor start fast."
   [project-root]
   (let [project-root (or project-root (System/getProperty "user.dir"))
         lsp-process (start-lsp-process project-root)
         lsp-out (.getOutputStream lsp-process)
         lsp-reader (BufferedReader. (InputStreamReader. (.getInputStream lsp-process) StandardCharsets/UTF_8))]
     (println (str "Warming clojure-lsp cache for " project-root " ..."))
-    ;; initialize は解析(+ cache 書込)完了後に応答するため、ここまで待てば warm 完了
+    ;; initialize only answers once analysis, and the cache write, are done
     (initialize-lsp lsp-out lsp-reader project-root)
-    ;; 明示 shutdown/exit で cache flush を確実化してからプロセス終了
+    ;; shutdown/exit before killing the process, so the cache is flushed
     (try
       (write-lsp-message lsp-out (make-lsp-request "shutdown" nil))
       (Thread/sleep 1000)
@@ -470,40 +511,17 @@
         (try (.destroy lsp-process) (catch Exception _ nil))
         (cleanup-pid-port-files! project-root)))))
 
-;; ============================================================================
-;; CLI
-;; ============================================================================
+(defn run
+  "CLI entry: `start [ROOT]`, `stop [ROOT]` or `warm [ROOT]`.
 
-(defn show-help []
-  (println "clj-lsp-bridge - TCP bridge wrapping clojure-lsp")
-  (println)
-  (println "Usage:")
-  (println "  clj-lsp-bridge start [PROJECT-ROOT]   Start bridge (default: cwd)")
-  (println "  clj-lsp-bridge stop [PROJECT-ROOT]    Stop running bridge")
-  (println "  clj-lsp-bridge warm [PROJECT-ROOT]    Warm the analysis cache and exit (no server)")
-  (println)
-  (println "The bridge starts clojure-lsp as a subprocess, communicates via")
-  (println "LSP stdio protocol, and listens on a localhost TCP port for")
-  (println "client queries from clj-lsp-client.")
-  (println)
-  (println "Files created in PROJECT-ROOT/.lsp/:")
-  (println "  .clj-lsp-bridge.port  — TCP port number")
-  (println "  .clj-lsp-bridge.pid   — bridge process PID"))
-
-(defn -main [& args]
-  (let [command (first args)]
+  Spawned by `clj-skill lsp` rather than invoked by hand."
+  [[command root]]
+  (let [root (or root (System/getProperty "user.dir"))]
     (case command
-      ("--help" "-h") (show-help)
-      "start" (let [project-root (or (second args) (System/getProperty "user.dir"))]
-                (run-bridge project-root))
-      "stop"  (let [project-root (or (second args) (System/getProperty "user.dir"))]
-                (stop-bridge project-root))
-      "warm"  (let [project-root (or (second args) (System/getProperty "user.dir"))]
-                (warm-cache project-root))
-      (nil) (run-bridge (System/getProperty "user.dir"))
-      ;; Unknown arg — show help
-      (do
-        (println (str "Unknown command: " command))
-        (println)
-        (show-help)
-        (System/exit 1)))))
+      "start" (do (run-bridge root) 0)
+      "stop" (do (stop-bridge root) 0)
+      "warm" (do (warm-cache root) 0)
+      (do (binding [*out* *err*]
+            (println (str "unknown lsp-bridge command: " command))
+            (println "expected one of: start, stop, warm"))
+          1))))

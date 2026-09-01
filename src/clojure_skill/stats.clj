@@ -33,59 +33,26 @@
 ;; Event Logging
 ;; ============================================================================
 
-(defn edn-output-fn
-  "Timbre output function that produces pure EDN from first varg.
-  This is used by the stats appender to write EDN entries directly."
-  [{:keys [vargs]}]
-  (when-let [data (first vargs)]
-    (pr-str data)))
-
-(defn timestamp-iso8601
-  "Generate ISO-8601 timestamp string"
-  []
-  (.toString (Instant/now)))
-
-(defn ensure-parent-dir
-  "Ensure parent directory exists for the given file path"
-  [file-path]
-  (when-let [parent-dir (fs/parent file-path)]
-    (fs/create-dirs parent-dir)))
-
 (defn log-stats!
-  "Low-level stats logging function that accepts arbitrary EDN data.
+  "Append one EDN entry to the stats file, tagged with the event type and time.
 
-  Parameters:
-  - event-type: keyword describing the event
-  - data: map of additional data to include in the log entry
-
-  Automatically adds :event-type and :timestamp to the data map."
+  Never throws: statistics are a side channel, and losing an entry must not fail
+  the edit the caller was in the middle of."
   [event-type data]
   (when *enable-stats*
     (try
-      (ensure-parent-dir *stats-file-path*)
-      (let [entry (merge {:event-type event-type
-                          :timestamp (timestamp-iso8601)}
-                         data)
-            stats-config {:min-level :trace
-                          :appenders {:stats (assoc
-                                              (timbre/spit-appender {:fname *stats-file-path*})
-                                              :enabled? true
-                                              :output-fn edn-output-fn)}}]
-        (binding [timbre/*config* stats-config]
-          (timbre/trace entry)))
+      (when-let [parent (fs/parent *stats-file-path*)]
+        (fs/create-dirs parent))
+      (spit *stats-file-path*
+            (str (pr-str (merge {:event-type event-type
+                                 :timestamp (str (Instant/now))}
+                                data))
+                 "\n")
+            :append true)
       (catch Exception e
-        ;; Use parent config for error logging
-        (timbre/error "Failed to log stats event:" (.getMessage e))))))
+        (timbre/debug "could not write stats entry:" (ex-message e))))))
 
 (defn log-event!
-  "Log a delimiter event to the stats file.
-
-  Parameters:
-  - event-type: keyword like :delimiter-error, :delimiter-fixed, :delimiter-fix-failed, :delimiter-ok
-  - hook-event: string like \"PreToolUse:Write\" or \"PostToolUse:Edit\"
-  - file-path: string path to the file being processed
-
-  Uses log-stats! internally with hook-event and file-path context."
+  "Log a delimiter event with the hook event and file it came from."
   [event-type hook-event file-path]
-  (log-stats! event-type {:hook-event hook-event
-                          :file-path file-path}))
+  (log-stats! event-type {:hook-event hook-event :file-path file-path}))
