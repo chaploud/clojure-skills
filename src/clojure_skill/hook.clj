@@ -1,17 +1,17 @@
-(babashka.deps/add-deps '{:deps {dev.weavejester/cljfmt {:mvn/version "0.15.5"}
-                                 parinferish/parinferish {:mvn/version "0.8.0"}}})
-
 (ns clojure-skill.hook
-  "Claude Code hook for delimiter error detection and repair"
+  "Claude Code hook that keeps delimiters balanced across the agent's edits.
+
+  On PreToolUse it rewrites a Write whose content is unbalanced; on PostToolUse
+  it repairs an Edit in place, restoring the pre-edit backup when the damage
+  cannot be repaired, so the agent never continues from a file it broke."
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
             [cljfmt.core :as cljfmt]
             [cljfmt.main]
-            [clojure.string :as string]
             [clojure.java.io :as io]
-            [clojure.tools.cli :refer [parse-opts]]
             [clojure-skill.delimiter-repair
              :refer [delimiter-error? fix-delimiters actual-delimiter-error?]]
+            [clojure-skill.files :refer [clojure-file?]]
             [clojure-skill.stats :as stats]
             [clojure-skill.tmp :as tmp]
             [taoensso.timbre :as timbre]))
@@ -24,112 +24,8 @@
 (def ^:dynamic *enable-revert* true)
 
 ;; ============================================================================
-;; CLI Options
-;; ============================================================================
-
-(def cli-options
-  [[nil "--cljfmt" "Enable cljfmt formatting on files after edit/write"]
-   [nil "--no-revert" "Disable automatic file revert on unfixable delimiter errors"
-    :id :no-revert
-    :default false]
-   [nil "--stats" "Enable statistics tracking for delimiter events (default: ~/.clojure-skill/stats.log)"
-    :id :stats
-    :default false]
-   [nil "--stats-file PATH" "Path to stats file (only used when --stats is enabled)"
-    :id :stats-file
-    :default (str (fs/path (fs/home) ".clojure-skill" "stats.log"))]
-   [nil "--log-level LEVEL" "Set log level for file logging"
-    :id :log-level
-    :parse-fn keyword
-    :validate [#{:trace :debug :info :warn :error :fatal :report}
-               "Must be one of: trace, debug, info, warn, error, fatal, report"]]
-   [nil "--log-file PATH" "Path to log file"
-    :id :log-file
-    :default "./.clojure-skill-hooks.log"]
-   ["-h" "--help" "Show help message"]])
-
-(defn usage []
-  (str "clj-paren-repair-claude-hook - Claude Code hook for Clojure delimiter repair\n"
-       "\n"
-       "Usage: clj-paren-repair-claude-hook [OPTIONS]\n"
-       "\n"
-       "Options:\n"
-       "      --cljfmt              Enable cljfmt formatting on files after edit/write\n"
-       "      --no-revert           Disable automatic file revert on unfixable delimiter errors\n"
-       "      --stats               Enable statistics tracking for delimiter events\n"
-       "                            (default: ~/.clojure-skill/stats.log)\n"
-       "      --stats-file PATH     Path to stats file (only used when --stats is enabled)\n"
-       "      --log-level LEVEL     Set log level for file logging\n"
-       "                            Levels: trace, debug, info, warn, error, fatal, report\n"
-       "      --log-file PATH       Path to log file (default: ./.clojure-skill-hooks.log)\n"
-       "  -h, --help                Show this help message"))
-
-(defn error-msg [errors]
-  (str "The following errors occurred while parsing command:\n\n"
-       (string/join \newline errors)))
-
-(defn handle-cli-args
-  "Parse CLI arguments and handle help/errors. Returns options map or exits."
-  [args]
-  (let [actual-args (if (seq args) args *command-line-args*)
-        {:keys [options errors]} (parse-opts actual-args cli-options)]
-    (cond
-      (:help options)
-      (do
-        (println (usage))
-        (System/exit 0))
-
-      errors
-      (do
-        (binding [*out* *err*]
-          (println (error-msg errors))
-          (println)
-          (println (usage)))
-        (System/exit 1))
-
-      :else
-      options)))
-
-;; ============================================================================
 ;; Claude Code Hook Functions
 ;; ============================================================================
-
-(defn- babashka-shebang?
-  "Checks if a file starts with a Babashka shebang.
-   Returns true if the first line matches a Babashka shebang pattern."
-  [file-path]
-  (when (fs/exists? file-path)
-    (try
-      (with-open [r (io/reader file-path)]
-        (let [line (-> r line-seq first)]
-          (and line
-               (re-matches #"^#!/[^\s]+/(bb|env\s{1,3}bb)(\s.*)?$" line))))
-      (catch Exception _ false))))
-
-(defn clojure-file?
-  "Checks if a file path has a Clojure-related extension or Babashka shebang.
-
-   Supported extensions:
-   - .clj (Clojure)
-   - .cljs (ClojureScript)
-   - .cljc (Clojure/ClojureScript shared)
-   - .cljd (ClojureDart)
-   - .bb (Babashka)
-   - .edn (Extensible Data Notation)
-   - .lpy (Basilisp)
-
-   Also detects files starting with a Babashka shebang (`bb`)."
-  [file-path]
-  (when file-path
-    (let [lower-path (string/lower-case file-path)]
-      (or (string/ends-with? lower-path ".clj")
-          (string/ends-with? lower-path ".cljs")
-          (string/ends-with? lower-path ".cljc")
-          (string/ends-with? lower-path ".cljd")
-          (string/ends-with? lower-path ".bb")
-          (string/ends-with? lower-path ".lpy")
-          (string/ends-with? lower-path ".edn")
-          (babashka-shebang? file-path)))))
 
 (defn run-cljfmt
   "Check if file needs formatting using cljfmt.core, then format with cljfmt.main.
@@ -254,36 +150,6 @@
        :delimiter-fixed false
        :formatted false
        :message (str "Error: " (.getMessage e))})))
-
-(defn process-pre-write
-  "Process content before write operation.
-  Returns fixed content if Clojure file has delimiter errors, nil otherwise."
-  [file-path content]
-  (when (and (clojure-file? file-path) (delimiter-error? content))
-    (fix-delimiters content)))
-
-(defn process-pre-edit
-  "Process file before edit operation.
-  Creates a backup of Clojure files, returns backup path if created."
-  [file-path session-id]
-  (when (clojure-file? file-path)
-    (backup-file file-path session-id)))
-
-(defn process-post-edit
-  "Process file after edit operation.
-  Compares edited file with backup, fixes delimiters if content changed,
-  and cleans up backup file."
-  [file-path session-id]
-  (when (clojure-file? file-path)
-    (let [ctx {:session-id session-id}
-          backup-file (tmp/backup-path ctx file-path)]
-      (try
-        (let [backup-content (try (slurp backup-file :encoding "UTF-8") (catch Exception _ nil))
-              file-content (slurp file-path :encoding "UTF-8")]
-          (when (not= backup-content file-content)
-            (process-pre-write file-path file-content)))
-        (finally
-          (delete-backup backup-file))))))
 
 (defmulti process-hook
   (fn [hook-input]
@@ -415,45 +281,33 @@
       (timbre/error "  Unexpected error during cleanup:" (.getMessage e))
       nil)))
 
-(defn -main [& args]
-  (let [options (handle-cli-args args)
-        log-level (:log-level options)
-        log-file (:log-file options)
-        enable-logging? (some? log-level)
-        enable-stats? (:stats options)
-        stats-path (stats/normalize-stats-path (:stats-file options))]
+(defn run
+  "Read one hook payload from stdin, act on it, and print any response.
 
+  Returns 0 even when nothing matched: a hook that exits non-zero on an event it
+  simply does not handle would surface as a tool failure to the agent."
+  [{:keys [cljfmt no-revert stats stats-file log-level log-file]}]
+  (let [log-file (or log-file "./.clojure-skill-hooks.log")
+        stats-file (or stats-file (str (fs/path (fs/home) ".clojure-skill" "stats.log")))]
     (timbre/set-config!
-     {:appenders {:spit (assoc
-                         (timbre/spit-appender {:fname log-file})
-                         :enabled? enable-logging?
-                         :min-level (or log-level :report)
-                         :ns-filter (if enable-logging?
-                                      {:allow "clojure-skill.*"}
-                                      {:deny "*"}))}})
-
-    ;; Set cljfmt, revert, and stats flags from CLI options
-    (binding [*enable-cljfmt* (:cljfmt options)
-              *enable-revert* (not (:no-revert options))
-              stats/*enable-stats* enable-stats?
-              stats/*stats-file-path* stats-path]
+     {:appenders {:spit (assoc (timbre/spit-appender {:fname log-file})
+                               :enabled? (some? log-level)
+                               :min-level (or log-level :report)
+                               :ns-filter (if log-level {:allow "clojure-skill.*"} {:deny "*"}))}})
+    (binding [*enable-cljfmt* (boolean cljfmt)
+              *enable-revert* (not no-revert)
+              stats/*enable-stats* (boolean stats)
+              stats/*stats-file-path* (stats/normalize-stats-path stats-file)]
       (try
-        (let [input-json (slurp *in*)
-              _ (timbre/debug "INPUT:" input-json)
-              _ (when *enable-cljfmt*
-                  (timbre/debug "cljfmt formatting is ENABLED"))
-              _ (when stats/*enable-stats*
-                  (timbre/debug "stats tracking is ENABLED, writing to:" stats/*stats-file-path*))
-              hook-input (json/parse-string input-json true)
-              response (process-hook hook-input)
-              _ (timbre/debug "OUTPUT:" (json/generate-string response))]
+        (let [input (slurp *in*)
+              _ (timbre/debug "INPUT:" input)
+              response (process-hook (json/parse-string input true))]
+          (timbre/debug "OUTPUT:" (json/generate-string response))
           (when response
             (println (json/generate-string response)))
-          (System/exit 0))
+          0)
         (catch Exception e
-          (timbre/error "Hook error:" (.getMessage e))
-          (timbre/error "Stack trace:" (with-out-str (.printStackTrace e)))
+          (timbre/error "hook error:" (ex-message e))
           (binding [*out* *err*]
-            (println "Hook error:" (.getMessage e))
-            (println "Stack trace:" (with-out-str (.printStackTrace e))))
-          (System/exit 2))))))
+            (println "hook error:" (ex-message e)))
+          2)))))

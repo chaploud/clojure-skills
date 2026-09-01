@@ -102,10 +102,14 @@
   (str (.toURI (io/file path))))
 
 (defn uri->file
-  "Convert an LSP location URI to a readable path.
-  file://…                → /abs/path
-  zipfile://…jar::inner   → /abs/to.jar:inner   (jar 内定義)
-  jar:file://…jar!/inner  → /abs/to.jar:inner"
+  "Turn an LSP location URI into a readable path.
+
+  A definition inside a dependency keeps both halves visible — the jar and the
+  entry within it — rather than being reported as an opaque archive URI.
+
+    file://…                -> /abs/path
+    zipfile://…jar::inner   -> /abs/to.jar:inner
+    jar:file://…jar!/inner  -> /abs/to.jar:inner"
   [uri]
   (cond
     (str/starts-with? uri "file://")
@@ -231,47 +235,45 @@
        :uri uri})
     {:diagnostics @diagnostics-cache}))
 
+(defn- position-params
+  "LSP params for a request at file/line/col.
+
+  Clients speak 1-based line and column, as editors and ripgrep do; LSP counts
+  from zero."
+  [file line col]
+  {:textDocument {:uri (file->uri file)}
+   :position {:line (dec line) :character (dec col)}})
+
+(defn- location->result
+  "An LSP Location as a 1-based, path-shaped map."
+  [loc]
+  {:file (uri->file (:uri loc))
+   :line (inc (get-in loc [:range :start :line]))
+   :col (inc (get-in loc [:range :start :character]))
+   :end-line (inc (get-in loc [:range :end :line]))
+   :end-col (inc (get-in loc [:range :end :character]))})
+
 (defn handle-references
-  "Find references for symbol at position (line/col は 1-based)."
+  "Locations that reference the symbol at the given position."
   [lsp-out {:keys [file line col]}]
-  (let [uri (file->uri file)
-        resp (send-lsp-request! lsp-out "textDocument/references"
-                                {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character (dec col)}
-                                 :context {:includeDeclaration true}})]
-    {:references
-     (mapv (fn [loc]
-             {:file (uri->file (:uri loc))
-              :line (inc (get-in loc [:range :start :line]))
-              :col (inc (get-in loc [:range :start :character]))
-              :end-line (inc (get-in loc [:range :end :line]))
-              :end-col (inc (get-in loc [:range :end :character]))})
-           (:result resp))}))
+  (let [resp (send-lsp-request! lsp-out "textDocument/references"
+                                (assoc (position-params file line col)
+                                       :context {:includeDeclaration true}))]
+    {:references (mapv location->result (:result resp))}))
 
 (defn handle-definition
-  "Go to definition for symbol at position (line/col は 1-based)."
+  "Location the symbol at the given position is defined at."
   [lsp-out {:keys [file line col]}]
-  (let [uri (file->uri file)
-        resp (send-lsp-request! lsp-out "textDocument/definition"
-                                {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character (dec col)}})]
-    (let [result (:result resp)
-          ;; clojure-lsp may return a single location or array
-          locs (if (map? result) [result] result)]
-      {:definitions
-       (mapv (fn [loc]
-               {:file (uri->file (:uri loc))
-                :line (inc (get-in loc [:range :start :line]))
-                :col (inc (get-in loc [:range :start :character]))})
-             locs)})))
+  (let [result (:result (send-lsp-request! lsp-out "textDocument/definition"
+                                           (position-params file line col)))]
+    ;; clojure-lsp answers with a single location or a vector of them
+    {:definitions (mapv location->result (if (map? result) [result] result))}))
 
 (defn handle-hover
-  "Get hover information for symbol at position (line/col は 1-based)."
+  "Documentation for the symbol at the given position."
   [lsp-out {:keys [file line col]}]
-  (let [uri (file->uri file)
-        resp (send-lsp-request! lsp-out "textDocument/hover"
-                                {:textDocument {:uri uri}
-                                 :position {:line (dec line) :character (dec col)}})]
+  (let [resp (send-lsp-request! lsp-out "textDocument/hover"
+                                (position-params file line col))]
     {:hover (get-in resp [:result :contents])}))
 
 (defn handle-client-command
@@ -391,20 +393,20 @@
   "Run a one-shot full-deps clojure-lsp stdio session to persist a
   server-reusable analysis cache, then exit.
 
-  clojure-lsp writes .lsp/.cache/db.transit.json only during startup
-  analysis, and the LSP server path uses :project-and-full-dependencies
-  (unlike the CLI `diagnostics`, which writes a server-incompatible
-  :project-only cache). Running this ahead of time (login / worktree
-  post-create) makes the first eglot / bridge start fast (warm initialize)."
+  clojure-lsp writes .lsp/.cache/db.transit.json only during startup analysis,
+  and only the server path analyses :project-and-full-dependencies — the CLI's
+  `diagnostics` writes a :project-only cache the server cannot reuse. Running
+  this ahead of time (at login, or after creating a worktree) is what makes the
+  first bridge or editor start fast."
   [project-root]
   (let [project-root (or project-root (System/getProperty "user.dir"))
         lsp-process (start-lsp-process project-root)
         lsp-out (.getOutputStream lsp-process)
         lsp-reader (BufferedReader. (InputStreamReader. (.getInputStream lsp-process) StandardCharsets/UTF_8))]
     (println (str "Warming clojure-lsp cache for " project-root " ..."))
-    ;; initialize は解析(+ cache 書込)完了後に応答するため、ここまで待てば warm 完了
+    ;; initialize only answers once analysis, and the cache write, are done
     (initialize-lsp lsp-out lsp-reader project-root)
-    ;; 明示 shutdown/exit で cache flush を確実化してからプロセス終了
+    ;; shutdown/exit before killing the process, so the cache is flushed
     (try
       (write-lsp-message lsp-out (make-lsp-request "shutdown" nil))
       (Thread/sleep 1000)
@@ -470,40 +472,17 @@
         (try (.destroy lsp-process) (catch Exception _ nil))
         (cleanup-pid-port-files! project-root)))))
 
-;; ============================================================================
-;; CLI
-;; ============================================================================
+(defn run
+  "CLI entry: `start [ROOT]`, `stop [ROOT]` or `warm [ROOT]`.
 
-(defn show-help []
-  (println "clj-lsp-bridge - TCP bridge wrapping clojure-lsp")
-  (println)
-  (println "Usage:")
-  (println "  clj-lsp-bridge start [PROJECT-ROOT]   Start bridge (default: cwd)")
-  (println "  clj-lsp-bridge stop [PROJECT-ROOT]    Stop running bridge")
-  (println "  clj-lsp-bridge warm [PROJECT-ROOT]    Warm the analysis cache and exit (no server)")
-  (println)
-  (println "The bridge starts clojure-lsp as a subprocess, communicates via")
-  (println "LSP stdio protocol, and listens on a localhost TCP port for")
-  (println "client queries from clj-lsp-client.")
-  (println)
-  (println "Files created in PROJECT-ROOT/.lsp/:")
-  (println "  .clj-lsp-bridge.port  — TCP port number")
-  (println "  .clj-lsp-bridge.pid   — bridge process PID"))
-
-(defn -main [& args]
-  (let [command (first args)]
+  Spawned by `clj-skill lsp` rather than invoked by hand."
+  [[command root]]
+  (let [root (or root (System/getProperty "user.dir"))]
     (case command
-      ("--help" "-h") (show-help)
-      "start" (let [project-root (or (second args) (System/getProperty "user.dir"))]
-                (run-bridge project-root))
-      "stop"  (let [project-root (or (second args) (System/getProperty "user.dir"))]
-                (stop-bridge project-root))
-      "warm"  (let [project-root (or (second args) (System/getProperty "user.dir"))]
-                (warm-cache project-root))
-      (nil) (run-bridge (System/getProperty "user.dir"))
-      ;; Unknown arg — show help
-      (do
-        (println (str "Unknown command: " command))
-        (println)
-        (show-help)
-        (System/exit 1)))))
+      "start" (do (run-bridge root) 0)
+      "stop" (do (stop-bridge root) 0)
+      "warm" (do (warm-cache root) 0)
+      (do (binding [*out* *err*]
+            (println (str "unknown lsp-bridge command: " command))
+            (println "expected one of: start, stop, warm"))
+          1))))

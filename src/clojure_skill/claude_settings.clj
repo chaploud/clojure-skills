@@ -8,7 +8,7 @@
 (def settings-path
   (str (fs/path (fs/home) ".claude" "settings.json")))
 
-(def hook-command "clj-paren-repair-claude-hook --cljfmt")
+(def hook-command "clj-skill hook --cljfmt")
 
 (def hook-entries
   {"PreToolUse"  [{"matcher" "Write|Edit"
@@ -29,7 +29,9 @@
 (defn- our-hook? [hook-group]
   (some (fn [h]
           (when-let [cmd (get h "command")]
-            (string/starts-with? cmd "clj-paren-repair-claude-hook")))
+            (or (string/starts-with? cmd "clj-skill hook")
+                ;; pre-1.0 name, so `bb uninstall` still cleans up an old install
+                (string/starts-with? cmd "clj-paren-repair-claude-hook"))))
         (get hook-group "hooks")))
 
 (defn install-hooks! []

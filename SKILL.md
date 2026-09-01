@@ -3,11 +3,11 @@ name: clojure-skills
 description: >-
   Clojure/ClojureScript/ClojureDart development skill. Activates when
   working with .clj, .cljs, .cljc, .cljd, .edn, .bb files. Provides
-  parenthesis repair tools, REPL evaluation via nREPL, and code
-  navigation (diagnostics, references, definition) via clojure-lsp.
+  structural search and editing of S-expressions, nREPL evaluation,
+  runtime queries via cider-nrepl, and static navigation via clojure-lsp.
 compatibility: >-
-  REPL evaluation and code navigation work with any agent that has
-  shell access. Optional paren-repair hooks require Claude Code.
+  Every command is a shell command, so any agent with shell access can use
+  them. The optional automatic paren-repair hooks are Claude Code specific.
 globs:
   - "**/*.clj"
   - "**/*.cljs"
@@ -20,148 +20,165 @@ hooks:
   Stop:
     - hooks:
         - type: command
-          command: "clj-lsp-client stop 2>/dev/null; true"
+          command: "clj-skill lsp stop 2>/dev/null; true"
 ---
 
 # Clojure Development Skill
 
-## Dependency Check
+All commands live under a single binary, `clj-skill`.
+Line and column numbers are **1-based everywhere**, matching editors and ripgrep.
 
-!`which bb 2>/dev/null && echo "✓ bb" || echo "✗ bb MISSING — install: brew install borkdude/brew/babashka (https://github.com/babashka/babashka#installation)"`
-!`which bbin 2>/dev/null && echo "✓ bbin" || echo "✗ bbin MISSING — install: bb install io.github.babashka/bbin (https://github.com/babashka/bbin)"`
-!`which clj-paren-repair-claude-hook 2>/dev/null && echo "✓ clj-tools" || echo "✗ clj-tools MISSING — install: cd ~/.claude/skills/clojure-skills && bb install"`
-!`which clojure-lsp 2>/dev/null && echo "✓ clojure-lsp" || echo "✗ clojure-lsp MISSING (optional) — install: brew install clojure-lsp/brew/clojure-lsp-native (https://clojure-lsp.io/installation/)"`
+## Check the environment first
 
-If any **required** dependency (bb, bbin, clj-tools) shows ✗ MISSING:
-1. Show the user the exact install command from the line above
-2. After install, tools will be available
+!`command -v clj-skill >/dev/null && clj-skill doctor || echo "clj-skill NOT INSTALLED — git clone https://github.com/chaploud/clojure-skills.git ~/clojure-skills && cd ~/clojure-skills && bb install"`
 
-clojure-lsp is optional — without it, diagnostics/references/definition are unavailable but paren repair and REPL evaluation still work.
+The report above says which command groups work here. Do not attempt a group it
+reports as unavailable — use the alternative named below instead.
 
-## Parenthesis Repair
+## Which command to reach for
 
-By default, parenthesis repair does **not** run automatically.
-Users can opt in via `bb install-hooks` to register PreToolUse/PostToolUse hooks.
+| Goal | Command | Needs |
+|---|---|---|
+| Map a large file before reading it | `clj-skill outline FILE` | nothing |
+| Find code by its *shape* | `clj-skill find PATTERN [PATH…]` | nothing |
+| Rewrite a whole top-level form | `clj-skill replace FILE PATTERN` | nothing |
+| Find code by its *text* | `rg` | nothing |
+| Balance delimiters / format | `clj-skill repair FILE…` | nothing |
+| Evaluate code | `clj-skill repl eval` | nREPL |
+| Callers of a function | `clj-skill cider refs SYM` | cider-nrepl |
+| Where a symbol is defined | `clj-skill cider info SYM` | cider-nrepl |
+| Run tests | `clj-skill cider test [NS…]` | cider-nrepl |
+| Explain the last exception | `clj-skill cider stacktrace` | cider-nrepl |
+| Look inside a huge value | `clj-skill cider inspect CODE` | cider-nrepl |
+| References / definition / hover | `clj-skill lsp …` | clojure-lsp |
+| Project diagnostics | `clj-skill lsp diagnostics` | clojure-lsp |
 
-### Manual repair (always available)
+`cider` answers about **what is loaded right now**; `lsp` answers from a
+**static index** and works on code that was never evaluated. When both are
+available, prefer `lsp` for navigation and `cider` for behaviour — tests,
+exceptions and values.
+
+## Structural commands (always available)
+
+### outline — read a big file cheaply
 
 ```bash
-clj-paren-repair <files...>
-clj-paren-repair path/to/file1.clj path/to/file2.clj
+clj-skill outline src/my/ns.clj
 ```
 
-**IMPORTANT:** Do NOT try to manually repair parenthesis/bracket/brace errors yourself.
-If you encounter unbalanced delimiters, run `clj-paren-repair` on the file.
-If the tool doesn't fix it, report to the user that they need to fix the delimiter error manually.
+Prints `path:START-END: <first line of the form>` for every top-level form. Use
+it before reading a file over a few hundred lines, then read only the range you
+need with `sed -n 'START,ENDp' FILE`.
 
-## REPL Evaluation
-
-The command `clj-nrepl-eval` evaluates Clojure code via nREPL.
-
-### Discover nREPL servers
+### find — search by shape, not by text
 
 ```bash
-clj-nrepl-eval --discover-ports
+clj-skill find '(defmethod &)' src
+clj-skill find '(rf/reg-event-fx _ &)' src/app --limit 100
 ```
 
-This scans `.nrepl-port` file and running JVM/Babashka processes to find nREPL servers.
+A pattern is a Clojure form in which:
 
-### Evaluate code
+- `_` matches any single form
+- `&` matches the rest of a sequence (and only makes sense as the last element)
 
-**IMPORTANT: ALWAYS use heredoc syntax** to avoid zsh `!` escaping issues.
-Do NOT use `clj-nrepl-eval -p PORT "code"` style — it will break on strings containing `!`.
+Everything else must match exactly as written, including collection type — `(a b)`
+does not match `[a b]`. Without a trailing `&` the arity is exact: `(inc _)`
+matches `(inc 1)` but not `(inc 1 2)`.
+
+Prints `path:line:col: <first line of the match>`. Defaults to 50 matches;
+raise it with `--limit`.
+
+Use `rg` when you are looking for a name or a string — it is faster and you
+already know it. Use `find` when the *structure* is the question.
+
+### replace — edit a whole form
 
 ```bash
-clj-nrepl-eval -p <port> <<'EOF'
-(+ 1 2 3)
+clj-skill replace src/my/ns.clj '(defn my-fn &)' <<'EOF'
+(defn my-fn [x]
+  (inc x))
 EOF
 ```
 
-With timeout (milliseconds):
+Reads the new form from stdin and swaps it in, leaving every other byte of the
+file — comments, blank lines, indentation of neighbouring forms — untouched.
+
+It **refuses to write** unless the pattern matches exactly one top-level form,
+and lists the candidates when it matches several. Prefer this over `Edit` for
+whole-function rewrites: it cannot mismatch on whitespace and cannot unbalance
+the file. Use `--dry-run` to see the effect first.
+
+### repair — fix delimiters
 
 ```bash
-clj-nrepl-eval -p <port> --timeout 5000 <<'EOF'
-(Thread/sleep 10000)
+clj-skill repair src/my/ns.clj              # in place
+echo '(defn f [x] (+ x 1' | clj-skill repair # as a filter
+```
+
+**Do not hand-count parentheses.** If a file has unbalanced delimiters, run
+`clj-skill repair` on it. If that does not fix it, tell the user; do not guess.
+
+## REPL
+
+**Always use a heredoc** — `zsh` mangles `!` inside a quoted argument.
+
+```bash
+clj-skill repl eval -p 7888 <<'EOF'
+(require '[my.ns :as n] :reload)
+(n/my-fn 42)
 EOF
 ```
 
-Multi-line code:
+- `clj-skill repl ports` — servers on this machine, and whether each has cider-nrepl
+- `--port` may be omitted when exactly one discovered server's directory is the
+  working directory; otherwise you are told to pass it
+- State persists between calls, per host:port. Use `:reload` when requiring a
+  namespace you just edited
+- `clj-skill repl reset -p PORT` starts a fresh session
+
+## Runtime queries (cider-nrepl)
 
 ```bash
-clj-nrepl-eval -p <port> <<'EOF'
-(require '[my.namespace :as ns] :reload)
-(ns/my-function 42)
-EOF
+clj-skill cider info my-fn --ns my.ns        # definition site, arglists, doc
+clj-skill cider refs my-fn --ns my.ns        # who calls it
+clj-skill cider deps my-fn --ns my.ns        # what it calls
+clj-skill cider test my.ns-test              # failures only, with expected/actual
+clj-skill cider retest                       # only what failed last time
+clj-skill cider stacktrace                   # last exception, project frames only
+clj-skill cider inspect '(big-thing)'        # paged view instead of the whole value
+clj-skill cider ops                          # what this server supports
 ```
 
-### Session persistence
+`test` reports only what broke, and exits non-zero when anything did.
+`stacktrace` reads the exception raised by the last `repl eval` — the session is
+shared — and prints only frames in project code; pass `--all` for the rest.
 
-The REPL session persists between evaluations — namespaces and state are maintained.
-Always use `:reload` when requiring namespaces to pick up code changes:
+If the server lacks cider-nrepl, each command says so and names the static
+alternative. `clj-skill cider ops` lists what the server does support.
 
-```clojure
-(require '[my.namespace :as ns] :reload)
-```
-
-### Other commands
+## Static navigation (clojure-lsp)
 
 ```bash
-clj-nrepl-eval --connected-ports    # List active connections
-clj-nrepl-eval -p PORT --reset-session  # Reset persistent session
+clj-skill lsp diagnostics --file src/my/ns.clj
+clj-skill lsp references --file src/my/ns.clj --line 10 --col 5
+clj-skill lsp definition --file src/my/ns.clj --line 10 --col 5
+clj-skill lsp hover      --file src/my/ns.clj --line 10 --col 5
 ```
 
-## Code Navigation (clojure-lsp)
+The bridge starts on first use and is reused. The project root is detected by
+walking up from `--file` to the nearest `deps.edn`/`project.clj`/`bb.edn`/
+`shadow-cljs.edn`, so several projects added with `/add-dir` each get their own.
 
-If `clojure-lsp` is installed, use `clj-lsp-client` for code intelligence.
-The bridge auto-starts per project when you first query with `--file`.
+A definition inside a dependency is printed as `/abs/to/foo.jar:inner/ns.clj:LINE:COL`.
 
-Project root is **auto-detected** from the `--file` path by walking up to find
-`deps.edn`, `project.clj`, `bb.edn`, or `shadow-cljs.edn`. This works across
-multiple projects added via `/add-dir`.
+The first start on a cold, large project can take minutes while clojure-lsp
+indexes; `clj-skill lsp-bridge warm ROOT` does that ahead of time.
 
-### Diagnostics
+## Notes
 
-```bash
-clj-lsp-client diagnostics                        # All files (current project)
-clj-lsp-client diagnostics --file src/my/ns.clj   # Single file (auto-detects project)
-```
-
-### Find references
-
-```bash
-clj-lsp-client references --file src/my/ns.clj --line 10 --col 5
-```
-
-### Go to definition
-
-```bash
-clj-lsp-client definition --file src/my/ns.clj --line 10 --col 5
-```
-
-### Hover information
-
-```bash
-clj-lsp-client hover --file src/my/ns.clj --line 10 --col 5
-```
-
-### Bridge management
-
-```bash
-clj-lsp-client start                             # Start bridge for CWD project
-clj-lsp-client start --project-root /path/to/project  # Start for specific project
-clj-lsp-client stop                              # Stop bridge
-clj-lsp-client status                            # Check bridge status
-```
-
-The bridge is automatically stopped on Stop via hooks.
-
-## Important Notes
-
-- **All Clojure variants supported**: .clj, .cljs, .cljc, .cljd, .edn, .bb, .lpy
-- **ClojureDart (.cljd)**: Reader conditionals with `:cljd` feature are fully supported
-- **Parenthesis repair is opt-in**: Run `bb install-hooks` to enable automatic hooks, or use `clj-paren-repair` manually
-- **REPL state persists**: Each host:port has its own persistent session. Use `--reset-session` to start fresh
-- **LSP bridge is per-project**: Each project gets its own bridge instance, auto-detected from file paths
-- **Coordinates**: `clj-lsp-client` uses **1-based line AND column** numbers (editor-style Ln:Col). Input `--line`/`--col` and the `line:col` in output are both 1-based.
-- **Jar definitions**: when `definition`/`references` point into a dependency jar, the path is shown as `/abs/to/foo.jar:inner/ns.clj:LINE:COL`
-- **Always use heredoc** for `clj-nrepl-eval`: `<<'EOF' ... EOF` — never use quoted argument style
+- All variants are supported: `.clj`, `.cljs`, `.cljc`, `.cljd` (ClojureDart),
+  `.edn`, `.bb`, `.lpy`, plus files with a `bb` shebang
+- Reader conditionals, `#js`, `#dart` and other tagged literals are handled
+  throughout — structural commands compare what is written, not what it expands to
+- Automatic paren repair on every Write/Edit is opt-in: `bb install-hooks`

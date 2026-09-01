@@ -269,3 +269,58 @@
           (:sessions response))))
     (catch Exception _
       nil)))
+
+;; ============================================================================
+;; Environment detection and shared sessions
+;; ============================================================================
+
+(defn detect-env-type
+  "Classify an nREPL server from its describe response.
+   Returns :clj, :bb, :basilisp, :scittle or :unknown."
+  [describe-response]
+  (when-let [versions (:versions describe-response)]
+    (cond
+      (or (get versions :clojure) (get versions "clojure")) :clj
+      (or (get versions :babashka) (get versions "babashka")) :bb
+      (or (get versions :basilisp) (get versions "basilisp")) :basilisp
+      (or (get versions :sci-nrepl) (get versions "sci-nrepl")) :scittle
+      :else :unknown)))
+
+(defn shadow-cljs?
+  "Whether the server is shadow-cljs, detected from the namespace it evaluates in."
+  [conn]
+  (try
+    (= "shadow.user" (:ns (eval-nrepl* conn "1")))
+    (catch Exception _ false)))
+
+(defn describe-session
+  "Describe the server and return {:env-type :ops}, where :ops is the set of op
+   names it supports."
+  [conn]
+  (let [resp (describe-nrepl* conn)
+        base (detect-env-type resp)]
+    {:env-type (if (shadow-cljs? conn) :shadow base)
+     :ops (set (map name (keys (:ops resp))))}))
+
+(defn ensure-session
+  "Return session data for conn, reusing the stored session when the server still
+   knows it and cloning a fresh one otherwise.
+
+   The session file is keyed by host:port and shared by every subcommand, which
+   is what lets `cider stacktrace` see the exception `repl eval` just raised.
+
+   Returns {:session-id :env-type :ops}."
+  [conn]
+  (let [{:keys [host port]} conn
+        stored (slurp-nrepl-session host port)
+        stored-id (:session-id stored)
+        active (when stored-id (:sessions (ls-sessions* conn)))]
+    (if (and stored-id (some #{stored-id} active) (:ops stored))
+      stored
+      (do
+        (when stored-id (delete-nrepl-session host port))
+        (let [session-id (:new-session (clone-session* conn))
+              data (merge {:session-id session-id} (describe-session conn))]
+          (spit-nrepl-session data host port)
+          data)))))
+

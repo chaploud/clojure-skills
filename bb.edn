@@ -1,34 +1,39 @@
-{:paths ["src"]
+;; 依存とソースパスは deps.edn を単一の情報源として参照する。bbin が生成する
+;; ラッパーも :local/root 経由で deps.edn を読むため、ここで再宣言すると
+;; 片方だけ更新されたときに CLI とタスクで別バージョンが走る。
+{:deps {clojure-skills/lib {:local/root "."}}
 
- :deps {parinferish/parinferish {:mvn/version "0.8.0"}
-        dev.weavejester/cljfmt {:mvn/version "0.15.5"}}
+ :bbin/bin {clj-skill {:main-opts ["-m" "clojure-skill.main"]}}
 
  :tasks
- {install {:doc "Install all CLI tools (paren-repair hooks are opt-in; use `bb install-hooks`)"
+ {:requires ([babashka.fs :as fs]
+             [clojure.edn :as edn])
+
+  -tools {:doc "Tool name -> main-opts, read from :bbin/bin so it is declared once"
+          :task (:bbin/bin (edn/read-string (slurp "bb.edn")))}
+
+  install {:doc "Install all CLI tools (paren-repair hooks are opt-in; use `bb install-hooks`)"
+           :depends [-tools]
            :task (do
-                   (let [tools {"clj-paren-repair-claude-hook" "clojure-skill.hook"
-                                "clj-nrepl-eval" "clojure-skill.nrepl-eval"
-                                "clj-paren-repair" "clojure-skill.paren-repair"
-                                "clj-lsp-bridge" "clojure-skill.lsp-bridge"
-                                "clj-lsp-client" "clojure-skill.lsp-client"}]
-                     (doseq [[tool-name main-ns] tools]
-                       (println (str "Installing " tool-name "..."))
-                       (shell "bbin" "install" "." "--as" tool-name
-                              "--main-opts" (str "[\"-m\" \"" main-ns "\"]"))))
-                   (println "\nAll tools installed.")
-                   (println "To enable auto paren-repair hooks: bb install-hooks"))}
+                   (doseq [[tool-name {:keys [main-opts]}] -tools]
+                     (println (str "Installing " tool-name "..."))
+                     (shell "bbin" "install" "." "--as" (str tool-name)
+                            "--main-opts" (pr-str main-opts)))
+                   (println)
+                   (shell "bb" "doctor"))}
 
   uninstall {:doc "Uninstall all CLI tools and remove hooks"
+             :depends [-tools]
              :task (do
                      (require 'clojure-skill.claude-settings)
                      ((resolve 'clojure-skill.claude-settings/uninstall-hooks!))
-                     (doseq [tool ["clj-paren-repair-claude-hook"
-                                   "clj-nrepl-eval"
-                                   "clj-paren-repair"
-                                   "clj-lsp-bridge"
-                                   "clj-lsp-client"]]
-                       (println (str "Uninstalling " tool "..."))
-                       (shell "bbin" "uninstall" tool))
+                     ;; the pre-1.0 per-tool binaries are removed too, so an
+                     ;; upgrade does not leave five broken wrappers on PATH
+                     (doseq [tool-name (concat (keys -tools)
+                                               '[clj-paren-repair-claude-hook clj-nrepl-eval
+                                                 clj-paren-repair clj-lsp-bridge clj-lsp-client])]
+                       (println (str "Uninstalling " tool-name "..."))
+                       (shell {:continue true :out nil :err nil} "bbin" "uninstall" (str tool-name)))
                      (println "\nAll tools uninstalled."))}
 
   install-hooks {:doc "Register paren-repair hooks in ~/.claude/settings.json (opt-in)"
@@ -41,17 +46,11 @@
                            (require 'clojure-skill.claude-settings)
                            ((resolve 'clojure-skill.claude-settings/uninstall-hooks!)))}
 
+  doctor {:doc "Report which skill features are available in this environment"
+          :task (do (require 'clojure-skill.doctor)
+                    ((resolve 'clojure-skill.doctor/-main)))}
+
   test {:doc "Run tests"
         :extra-paths ["test"]
-        :extra-deps {io.github.cognitect-labs/test-runner
-                     {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-        :task (exec 'cognitect.test-runner.api/test)
-        :exec-args {:dirs ["test"]}
-        :org.babashka/cli {:coerce {:nses [:symbol]
-                                    :vars [:symbol]}}}}
-
- :bbin/bin {clj-paren-repair-claude-hook {:main-opts ["-m" "clojure-skill.hook"]}
-            clj-nrepl-eval {:main-opts ["-m" "clojure-skill.nrepl-eval"]}
-            clj-paren-repair {:main-opts ["-m" "clojure-skill.paren-repair"]}
-            clj-lsp-bridge {:main-opts ["-m" "clojure-skill.lsp-bridge"]}
-            clj-lsp-client {:main-opts ["-m" "clojure-skill.lsp-client"]}}}
+        :task (do (require 'clojure-skill.test-runner)
+                  ((resolve 'clojure-skill.test-runner/-main)))}}}
